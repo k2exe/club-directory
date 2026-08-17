@@ -169,6 +169,44 @@ credential for its 15-minute life:
 location /auth/ { access_log off; proxy_pass http://127.0.0.1:8080; }
 ```
 
+## Deployment with Docker Compose
+
+`docker-compose.yml` runs two containers: `app` (this binary, built from the
+included `Dockerfile`, cgo-free since `modernc.org/sqlite` is pure Go) and
+`nginx` (a reverse proxy in front of it). The app container is not published
+to the host — only nginx is — so nginx's address is the only one the app
+trusts for `X-Forwarded-For`.
+
+```bash
+cp .env.example .env   # then edit it
+docker compose up -d --build
+```
+
+Everything is configured through `.env` (see the comments in
+`.env.example`), including SMTP credentials — pass them there rather than
+baking them into the image.
+
+**Hostname and TLS.** nginx always serves plain HTTP on `:80`, proxying
+straight through to the app — this is the mode for a bare `.local.mesh` name
+where a certificate isn't obtainable at all. Drop a manually provisioned
+`fullchain.pem` and `privkey.pem` into `nginx/certs/` (see
+`nginx/certs/README.md`) to *also* enable `:443` for a real domain name.
+Neither port redirects to or requires the other — `:80` keeps working
+unmodified even once `:443` is live, since the brief here was pass-through,
+not forced HTTPS. Restart nginx after adding or replacing certs:
+
+```bash
+docker compose restart nginx
+```
+
+Only set `SECURE_COOKIES=true` in `.env` once members actually reach the app
+over `https://` — turning it on while they're on plain `http://` (the
+`.local.mesh` case) would make session cookies unusable.
+
+The roster, photos, outbox, and audit log all live in the `clubdir-data`
+named volume, mounted at `/data` in the app container — back that volume up
+the same way as the bare-metal `data/` directory below.
+
 **Backups** are a copy of the data directory:
 
 ```
@@ -243,4 +281,9 @@ photo.go      upload validation, cropping, resizing
 handlers.go   public directory, sign-in, member self-service
 admin.go      roster management, settings, export
 web/          templates and stylesheet, embedded into the binary
+
+Dockerfile          multi-stage build of the app image (cgo-free, non-root)
+docker-compose.yml  app + nginx stack, see "Deployment with Docker Compose"
+.env.example        template for docker compose's .env
+nginx/              reverse proxy image: templates, optional-TLS entrypoint, certs/
 ```

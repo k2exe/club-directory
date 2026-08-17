@@ -1,0 +1,29 @@
+server {
+	listen 443 ssl;
+	server_name ${SERVER_NAME};
+
+	ssl_certificate     /etc/nginx/certs/fullchain.pem;
+	ssl_certificate_key /etc/nginx/certs/privkey.pem;
+	ssl_protocols TLSv1.2 TLSv1.3;
+
+	# Present but not required: :80 keeps serving plain HTTP unredirected
+	# (see default.conf.template), for the local.mesh case where a cert
+	# isn't obtainable at all.
+	client_max_body_size 10m;
+
+	proxy_http_version 1.1;
+	proxy_set_header Host $host;
+	proxy_set_header X-Real-IP $remote_addr;
+	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	proxy_set_header X-Forwarded-Proto $scheme;
+	proxy_redirect off;
+
+	location /auth/ {
+		access_log off;
+		proxy_pass http://app:8080;
+	}
+
+	location / {
+		proxy_pass http://app:8080;
+	}
+}

@@ -1,2 +1,5 @@
 data/
 clubdir
+.env
+nginx/certs/*.pem
+nginx/certs/*.key

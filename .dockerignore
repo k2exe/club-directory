@@ -1,0 +1,6 @@
+data/
+clubdir
+.git
+.gitignore
+nginx/certs/*
+!nginx/certs/.gitkeep

@@ -1,0 +1,61 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: club-directory:latest
+    restart: unless-stopped
+    environment:
+      CD_BASE_URL: "${BASE_URL:?set BASE_URL in .env, e.g. http://clubdir.local.mesh}"
+      CD_TRUSTED_PROXIES: "${TRUSTED_PROXIES:-172.28.1.20/32}"
+      CD_BOOTSTRAP_ADMIN: "${BOOTSTRAP_ADMIN:-}"
+      CD_SECURE_COOKIES: "${SECURE_COOKIES:-}"
+      CD_ECHO_MAIL: "${ECHO_MAIL:-}"
+      CD_SMTP_HOST: "${SMTP_HOST:-}"
+      CD_SMTP_PORT: "${SMTP_PORT:-25}"
+      CD_SMTP_USER: "${SMTP_USER:-}"
+      CD_SMTP_PASS: "${SMTP_PASS:-}"
+      CD_SMTP_FROM: "${SMTP_FROM:-club-directory@localhost}"
+      CD_SMTP_STARTTLS: "${SMTP_STARTTLS:-}"
+      CD_SMTP_INSECURE: "${SMTP_INSECURE:-}"
+    volumes:
+      - clubdir-data:/data
+    networks:
+      internal:
+        ipv4_address: 172.28.1.10
+    # Not published to the host — only nginx is reachable from outside this
+    # compose network, so trusting its X-Forwarded-For is safe.
+    expose:
+      - "8080"
+
+  nginx:
+    build:
+      context: ./nginx
+    image: club-directory-nginx:latest
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      SERVER_NAME: "${SERVER_NAME:?set SERVER_NAME in .env, e.g. clubdir.local.mesh}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Drop a manually provisioned fullchain.pem + privkey.pem here to turn
+      # on :443. Leave it empty for a local.mesh name with no cert available
+      # — nginx serves plain :80 either way, never redirects to :443.
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      internal:
+        ipv4_address: 172.28.1.20
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+
+volumes:
+  clubdir-data:
