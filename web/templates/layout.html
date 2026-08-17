@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · {{.Set.ClubName}}</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2312242f'/><text x='8' y='12' font-size='11' font-family='monospace' fill='%23e8e5de' text-anchor='middle'>C</text></svg>">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <div class="wrap masthead-in">
+    <a class="brand" href="/">
+      <span class="brand-name">{{.Set.ClubName}}</span>
+      {{if .Set.ClubCallSign}}<span class="brand-call">{{.Set.ClubCallSign}}</span>{{end}}
+    </a>
+    <nav class="nav">
+      <a href="/" {{if eq .Path "/"}}aria-current="page"{{end}}>Directory</a>
+      {{if .Me}}
+        <a href="/account" {{if eq .Path "/account"}}aria-current="page"{{end}}>Your details</a>
+        {{if .Admin}}<a href="/admin" {{if eq .Path "/admin"}}aria-current="page"{{end}}>Roster</a>{{end}}
+        <form method="post" action="/logout" class="inline">
+          <input type="hidden" name="csrf" value="{{.CSRF}}">
+          <button class="linkish" type="submit">Sign out</button>
+        </form>
+      {{else}}
+        <a class="cta" href="/login">Sign in</a>
+      {{end}}
+    </nav>
+  </div>
+</header>
+
+{{if .Flash}}
+<div class="wrap"><p class="flash flash-{{.Flash.Kind}}" role="status">{{.Flash.Text}}</p></div>
+{{end}}
+
+<main id="main" class="wrap">
+{{template "content" .}}
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>{{.Set.ClubName}}{{if .Set.ClubCallSign}} · {{.Set.ClubCallSign}}{{end}} — members' directory.
+      Name and call sign are listed by default; everything else is shared only when a member says so.</p>
+    {{if .Admin}}<p><a href="/admin/settings">Settings</a> · <a href="/admin/log">Activity log</a> · <a href="/admin/export.csv">Export CSV</a></p>{{end}}
+  </div>
+</footer>
+</body>
+</html>

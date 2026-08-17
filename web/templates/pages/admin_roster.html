@@ -1,0 +1,65 @@
+{{define "content"}}
+<div class="headrow">
+  <div>
+    <p class="eyebrow">Admin</p>
+    <h1 class="page-title">Roster</h1>
+  </div>
+  <a class="btn" href="/admin/new">Add a member</a>
+</div>
+
+<form class="searchbar" method="get" action="/admin">
+  <label class="sr" for="q">Search the roster</label>
+  <input id="q" type="search" name="q" value="{{.Data.Query.Text}}" placeholder="Call sign, name, email, town">
+  <select name="status" aria-label="Filter by status">
+    <option value="">Any status</option>
+    {{range statuses}}<option value="{{.}}" {{if eq (printf "%s" .) $.Data.Query.Status}}selected{{end}}>{{.Label}}</option>{{end}}
+  </select>
+  <select name="role" aria-label="Filter by role">
+    <option value="">Any role</option>
+    <option value="admin" {{if eq .Data.Query.Role "admin"}}selected{{end}}>Admins</option>
+    <option value="member" {{if eq .Data.Query.Role "member"}}selected{{end}}>Members</option>
+  </select>
+  <button type="submit">Filter</button>
+  <a class="clear" href="/admin">Clear</a>
+</form>
+
+<p class="tally">
+  {{range statuses}}<span class="tally-item"><b>{{index $.Data.Counts .}}</b> {{.Label}}</span>{{end}}
+  <span class="tally-item"><b>{{.Data.Total}}</b> total</span>
+</p>
+
+<div class="tablewrap">
+<table class="roster">
+  <thead><tr>
+    <th>Call sign</th><th>Name</th><th>Status</th><th>Sign-in email</th>
+    <th>Shares</th><th>Two-step</th><th>Last in</th><th></th>
+  </tr></thead>
+  <tbody>
+  {{range .Data.Cards}}
+    <tr class="row-{{.Status}}">
+      <td class="mono strong">{{if .CallSign}}{{.CallSign}}{{else}}—{{end}}</td>
+      <td>{{if .Name}}{{.Name}}{{else}}<span class="quiet">not set</span>{{end}}
+        {{if eq .Role "admin"}}<span class="tag-admin">admin</span>{{end}}
+        {{if .NeedsReview}}<span class="tag-review" title="Waiting for the member to review sharing">review</span>{{end}}</td>
+      <td><span class="dot dot-{{.Status}}"></span>{{.Status.Label}}</td>
+      <td class="mono small">{{.LoginEmail}}</td>
+      <td class="small">{{if .Email}}e{{end}}{{if .Phone}} p{{end}}{{if not .Address.Empty}} a{{end}}{{if .PhotoFile}} photo{{end}}</td>
+      <td class="small">{{if .MFAOn}}on{{else}}<span class="quiet">off</span>{{end}}</td>
+      <td class="small">{{maybeDate .LastLoginAt}}</td>
+      <td><a href="/admin/member/{{.ID}}">Manage</a>
+        {{if eq .Status "pending"}}
+        <form method="post" action="/admin/member/{{.ID}}/status" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="status" value="active">
+          <button class="linkish approve" type="submit">Approve</button>
+        </form>
+        {{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="8" class="quiet">No records match those filters.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+<p class="quiet">The Shares column reflects what each member has approved: e = email, p = phone, a = address.</p>
+{{end}}

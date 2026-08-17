@@ -1,0 +1,15 @@
+{{define "content"}}
+<div class="narrow">
+  <p class="eyebrow">Two-step verification</p>
+  <h1 class="page-title">Enter your six-digit code</h1>
+  <p class="lede">Open your authenticator app and type the current code for this directory.</p>
+  <form method="post" action="/login/code" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="code">Code</label>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9A-Za-z\-]{6,12}" required autofocus class="codefield">
+    <button class="btn" type="submit">Verify</button>
+  </form>
+  <p class="quiet">Lost your phone? Type one of your backup codes instead.</p>
+</div>
+{{end}}

@@ -1,0 +1,43 @@
+{{define "content"}}
+<section class="hero">
+  <p class="eyebrow">Member directory</p>
+  <h1 class="hero-title">{{.Set.ClubName}}</h1>
+  {{if .Set.Tagline}}<p class="hero-sub">{{.Set.Tagline}}</p>{{end}}
+</section>
+
+<form class="searchbar" method="get" action="/">
+  <label class="sr" for="q">Search the directory</label>
+  <input id="q" type="search" name="q" value="{{.Data.Query.Text}}"
+         placeholder="{{if .Me}}Search by call sign, name or town{{else}}Search by call sign or name{{end}}" autocomplete="off">
+  <button type="submit">Search</button>
+  {{if or .Data.Query.Text .Data.Query.Status}}<a class="clear" href="/">Clear</a>{{end}}
+</form>
+
+{{if .Data.CanSeeMore}}
+<p class="notice">You are seeing the public listing: names and call signs only.
+  <a href="/login">Sign in</a> to see what members have chosen to share with the club.</p>
+{{end}}
+
+{{if not .Data.Cards}}
+  <div class="empty">
+    <p class="empty-big">Nothing matches that search.</p>
+    <p>Try a partial call sign, a surname, or <a href="/">show everyone</a>.</p>
+  </div>
+{{else}}
+  {{range .Data.Groups}}
+    <section class="group">
+      <h2 class="group-title">
+        {{if eq .Status "active"}}Members
+        {{else if eq .Status "former"}}Former members
+        {{else if eq .Status "sk"}}Silent keys
+        {{else if eq .Status "pending"}}Awaiting approval
+        {{else}}Banned{{end}}
+        <span class="group-count">{{len .Cards}}</span>
+      </h2>
+      <div class="grid">
+        {{range .Cards}}{{template "card" .}}{{end}}
+      </div>
+    </section>
+  {{end}}
+{{end}}
+{{end}}

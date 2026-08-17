@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="narrow">
+  <p class="eyebrow">Sign in</p>
+  <h1 class="page-title">Get a link by email</h1>
+  <p class="lede">Enter the address the club has for you. We will email a link that signs you in — there is no password to remember.</p>
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="next" value="{{.Data}}">
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email" required autocomplete="email" autofocus placeholder="you@example.com">
+    <button class="btn" type="submit">Email me a link</button>
+  </form>
+  {{if .Set.SignupsOpen}}
+  <p class="quiet">New to the club? Use the same form. We will create a record for you and an admin will approve it.</p>
+  {{else}}
+  <p class="quiet">Sign-ups are closed. Ask a club admin to add you to the roster.</p>
+  {{end}}
+</div>
+{{end}}

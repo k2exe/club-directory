@@ -1,0 +1,28 @@
+{{define "content"}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<div class="narrow">
+<p class="eyebrow">Admin</p>
+<h1 class="page-title">Add a member</h1>
+<p class="lede">You need an email address — that is how they sign in. They fill in the rest themselves.</p>
+<form method="post" action="/admin/new" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="email">Sign-in email</label>
+  <input id="email" name="email" type="email" required autofocus>
+  <div class="row">
+    <div><label for="name">Name</label><input id="name" name="name"></div>
+    <div><label for="call">Call sign</label><input id="call" name="call_sign" class="mono"></div>
+  </div>
+  <div class="row">
+    <div><label for="status">Status</label>
+      <select id="status" name="status">
+        {{range statuses}}<option value="{{.}}" {{if eq (printf "%s" .) "active"}}selected{{end}}>{{.Label}}</option>{{end}}
+      </select></div>
+    <div><label for="role">Role</label>
+      <select id="role" name="role"><option value="member">Member</option><option value="admin">Admin</option></select></div>
+  </div>
+  <label class="check"><input type="checkbox" name="send_invite" checked><span>Email them a sign-in link now</span></label>
+  <button class="btn" type="submit">Add to roster</button>
+</form>
+<p class="quiet">Admins are required to set up two-step verification the first time they sign in.</p>
+</div>
+{{end}}

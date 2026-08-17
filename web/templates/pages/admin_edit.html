@@ -1,0 +1,108 @@
+{{define "content"}}
+{{$m := .Data.M}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow">Managing</p>
+    <h1 class="page-title mono">{{if $m.CallSign}}{{$m.CallSign}}{{else}}{{$m.Email}}{{end}}</h1>
+    <p class="quiet">{{$m.Name}} · joined {{date $m.JoinedAt}} · last signed in {{maybeDate $m.LastLoginAt}}</p>
+  </div>
+  <a class="btn btn-quiet" href="/m/{{$m.ID}}">View listing</a>
+</div>
+
+<div class="cols">
+  <section class="panel">
+    <h2 class="panel-title">Record</h2>
+    <form method="post" action="/admin/member/{{$m.ID}}" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <div class="row">
+        <div><label for="name">Name</label><input id="name" name="name" value="{{$m.Name}}"></div>
+        <div><label for="call">Call sign</label><input id="call" name="call_sign" value="{{$m.CallSign}}" class="mono"></div>
+      </div>
+      <label for="email">Sign-in email</label>
+      <input id="email" name="email" type="email" value="{{$m.Email}}" required>
+      <label for="role">Role</label>
+      <select id="role" name="role">
+        <option value="member" {{if eq (printf "%s" $m.Role) "member"}}selected{{end}}>Member</option>
+        <option value="admin" {{if $m.IsAdmin}}selected{{end}}>Admin</option>
+      </select>
+      {{if .Data.LastAdmin}}<p class="quiet">This is the only admin, so the role is locked until someone else is promoted.</p>{{end}}
+
+      <h3 class="sub">Contact details</h3>
+      <p class="quiet">You can record these, but they stay hidden from other members until {{if $m.Name}}{{$m.Name}}{{else}}the member{{end}} approves sharing them.</p>
+      <div class="row">
+        <div><label for="cemail">Contact email</label><input id="cemail" name="contact_email" type="email" value="{{$m.ContactEmail}}"></div>
+        <div><label for="phone">Phone</label><input id="phone" name="phone" value="{{$m.Phone}}"></div>
+      </div>
+      <label for="line1">Address</label>
+      <input id="line1" name="line1" value="{{$m.Address.Line1}}" placeholder="Street address">
+      <input name="line2" value="{{$m.Address.Line2}}" placeholder="Apartment, unit (optional)">
+      <div class="row row-3">
+        <div><label for="city">Town</label><input id="city" name="city" value="{{$m.Address.City}}"></div>
+        <div><label for="state">State</label><input id="state" name="state" value="{{$m.Address.State}}"></div>
+        <div><label for="postal">Postcode</label><input id="postal" name="postal" value="{{$m.Address.Postal}}"></div>
+      </div>
+      <label for="notes">Admin notes <span class="quiet">(never shown to members)</span></label>
+      <textarea id="notes" name="admin_notes" rows="3">{{$m.AdminNotes}}</textarea>
+      <button class="btn" type="submit">Save record</button>
+    </form>
+  </section>
+
+  <div>
+    <section class="panel">
+      <h2 class="panel-title">Membership status</h2>
+      <form method="post" action="/admin/member/{{$m.ID}}/status" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label for="status">Status</label>
+        <select id="status" name="status">
+          {{range statuses}}<option value="{{.}}" {{if eq (printf "%s" .) (printf "%s" $m.Status)}}selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+        <label for="reason">Reason <span class="quiet">(shown to the member)</span></label>
+        <input id="reason" name="reason" value="{{$m.StatusReason}}" list="reasons" placeholder="Departed, dues unpaid, …">
+        <datalist id="reasons">
+          <option value="Departed the club">
+          <option value="Dues unpaid">
+          <option value="Moved away">
+          <option value="Conduct">
+        </datalist>
+        <label for="sk">Silent key date <span class="quiet">(year or full date, optional)</span></label>
+        <input id="sk" name="sk_date" value="{{$m.SKDate}}" placeholder="2026">
+        <button class="btn" type="submit">Update status</button>
+      </form>
+      <p class="quiet">Banned records are hidden from everyone but admins and are signed out immediately. Silent keys stay listed as a memorial.</p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Sharing, as chosen by the member</h2>
+      <ul class="consent-list">
+        <li>{{if $m.Share.Email}}<b>Shared</b>{{else}}Private{{end}} — email</li>
+        <li>{{if $m.Share.Phone}}<b>Shared</b>{{else}}Private{{end}} — phone</li>
+        <li>{{if $m.Share.Address}}<b>Shared</b>{{else}}Private{{end}} — address</li>
+        <li>{{if $m.Share.Photo}}<b>Shared</b>{{else}}Private{{end}} — photo</li>
+      </ul>
+      <p class="quiet">Read-only by design: only the member can change these, after signing in.
+        {{if $m.NeedsReview}} They have unreviewed changes waiting.{{end}}</p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Access</h2>
+      <p class="quiet">Two-step verification is {{if $m.MFAOn}}on{{else}}off{{end}}{{if $m.IsAdmin}} — required for this admin{{end}}.</p>
+      <form method="post" action="/admin/member/{{$m.ID}}/invite">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn btn-quiet" type="submit">Send a sign-in link</button>
+      </form>
+    </section>
+
+    <section class="panel panel-danger">
+      <h2 class="panel-title">Delete permanently</h2>
+      <p class="quiet">Removes the record and photo for good. Marking someone Former or Silent Key keeps the club's history instead.</p>
+      <form method="post" action="/admin/member/{{$m.ID}}/delete" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label for="confirm">Type <code>{{$m.Email}}</code> to confirm</label>
+        <input id="confirm" name="confirm" autocomplete="off">
+        <button class="btn btn-danger" type="submit">Delete this member</button>
+      </form>
+    </section>
+  </div>
+</div>
+{{end}}

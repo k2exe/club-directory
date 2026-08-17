@@ -1,0 +1,100 @@
+{{define "content"}}
+{{$m := .Data.Me}}
+<p class="eyebrow">Your details</p>
+<h1 class="page-title">{{if $m.CallSign}}{{$m.CallSign}}{{else}}Your record{{end}}</h1>
+
+{{if eq $m.Status "pending"}}
+<p class="notice">Your sign-up is waiting for an admin to approve it. You can fill in your details now — you will appear in the directory once you are approved.</p>
+{{end}}
+{{if eq $m.Status "former"}}
+<p class="notice">Your membership is recorded as former{{if $m.StatusReason}} ({{$m.StatusReason}}){{end}}. Contact a club admin if that looks wrong.</p>
+{{end}}
+{{if $m.NeedsReview}}
+<p class="notice notice-act">An admin added or changed contact details on your record. Nothing new is shared until you review the choices below.</p>
+{{end}}
+
+<div class="cols">
+  <section class="panel">
+    <h2 class="panel-title">Who you are</h2>
+    <p class="quiet">Your name and call sign are what the club lists by default.</p>
+    <form method="post" action="/account" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <div class="row">
+        <div><label for="name">Name</label>
+          <input id="name" name="name" value="{{$m.Name}}" required autocomplete="name"></div>
+        <div><label for="call">Call sign</label>
+          <input id="call" name="call_sign" value="{{$m.CallSign}}" class="mono" placeholder="W1AW"></div>
+      </div>
+
+      <h3 class="sub">Optional contact details</h3>
+      <p class="quiet">Filling these in does not publish them. You choose what is shared in the next panel.</p>
+      <div class="row">
+        <div><label for="cemail">Contact email</label>
+          <input id="cemail" name="contact_email" type="email" value="{{$m.ContactEmail}}"
+                 placeholder="{{$m.Email}}"></div>
+        <div><label for="phone">Phone</label>
+          <input id="phone" name="phone" value="{{$m.Phone}}" autocomplete="tel"></div>
+      </div>
+      <label for="line1">Address</label>
+      <input id="line1" name="line1" value="{{$m.Address.Line1}}" placeholder="Street address">
+      <input name="line2" value="{{$m.Address.Line2}}" placeholder="Apartment, unit (optional)">
+      <div class="row row-3">
+        <div><label for="city">Town or city</label><input id="city" name="city" value="{{$m.Address.City}}"></div>
+        <div><label for="state">State</label><input id="state" name="state" value="{{$m.Address.State}}"></div>
+        <div><label for="postal">Postcode</label><input id="postal" name="postal" value="{{$m.Address.Postal}}"></div>
+      </div>
+      <button class="btn" type="submit">Save details</button>
+    </form>
+  </section>
+
+  <div>
+    <section class="panel panel-consent">
+      <h2 class="panel-title">What the club can see</h2>
+      <p class="quiet">Each box you tick shares that detail with signed-in members. Untick to take it back at any time. Admins can always see everything on your record.</p>
+      <form method="post" action="/account/sharing" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label class="check"><input type="checkbox" name="share_email" {{if $m.Share.Email}}checked{{end}}>
+          <span>Email address</span></label>
+        <label class="check"><input type="checkbox" name="share_phone" {{if $m.Share.Phone}}checked{{end}}>
+          <span>Phone number</span></label>
+        <label class="check"><input type="checkbox" name="share_address" {{if $m.Share.Address}}checked{{end}}>
+          <span>Postal address</span></label>
+        <label class="check"><input type="checkbox" name="share_photo" {{if $m.Share.Photo}}checked{{end}}>
+          <span>Profile photo</span></label>
+        <button class="btn" type="submit">Save sharing choices</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Photo</h2>
+      <div class="photorow">
+        {{if $m.PhotoFile}}
+          <img class="sheet-photo" src="/photo/{{$m.PhotoFile}}" alt="Your current photo">
+        {{else}}
+          <span class="sheet-photo sheet-photo-blank" aria-hidden="true">{{initials $m.Name}}</span>
+        {{end}}
+        <div class="stack">
+          <form method="post" action="/account/photo" enctype="multipart/form-data" class="stack">
+            <input type="hidden" name="csrf" value="{{.CSRF}}">
+            <input type="file" name="photo" accept="image/jpeg,image/png,image/gif" required>
+            <button class="btn btn-quiet" type="submit">Upload</button>
+          </form>
+          {{if $m.PhotoFile}}
+          <form method="post" action="/account/photo/remove">
+            <input type="hidden" name="csrf" value="{{.CSRF}}">
+            <button class="linkish danger" type="submit">Remove photo</button>
+          </form>
+          {{end}}
+        </div>
+      </div>
+      <p class="quiet">Images are cropped square, resized and re-saved, which strips any location data the file carried.</p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Sign-in security</h2>
+      <p class="quiet">Signing in: email link{{if $m.MFAOn}} plus an authenticator code{{end}}.</p>
+      <p><a class="btn btn-quiet" href="/account/security">Manage two-step verification</a></p>
+    </section>
+  </div>
+</div>
+{{end}}

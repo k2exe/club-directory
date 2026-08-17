@@ -1,0 +1,11 @@
+{{define "content"}}
+<div class="narrow">
+  <p class="eyebrow">Check your email</p>
+  <h1 class="page-title">Your link is on its way</h1>
+  <p class="lede">If that address is on the roster, a sign-in link is in your inbox. It works once and expires in 15 minutes.</p>
+  {{if not .Data}}
+  <p class="notice">No mail relay is configured on this server, so the message was written to <code>data/outbox</code> and printed to the server log. An admin can read the link from there.</p>
+  {{end}}
+  <p><a href="/login">Send another link</a></p>
+</div>
+{{end}}

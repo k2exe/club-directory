@@ -1,0 +1,21 @@
+{{define "card"}}
+<a class="qsl qsl-{{.Status}}" href="/m/{{.ID}}">
+  <div class="qsl-head">
+    {{if .PhotoFile}}
+      <img class="qsl-photo" src="/photo/{{.PhotoFile}}" alt="">
+    {{else}}
+      <span class="qsl-photo qsl-photo-blank" aria-hidden="true">{{initials .Name}}</span>
+    {{end}}
+    <span class="qsl-call">{{if .CallSign}}{{.CallSign}}{{else}}<span class="qsl-nocall">no call sign</span>{{end}}</span>
+  </div>
+  <div class="qsl-rule"></div>
+  <p class="qsl-name">{{if .Name}}{{.Name}}{{else}}Name not set{{end}}</p>
+  <p class="qsl-meta">
+    {{if .Address.City}}{{.Address.City}}{{if .Address.State}}, {{.Address.State}}{{end}}{{end}}
+  </p>
+  {{if ne .Status "active"}}
+    <span class="stamp stamp-{{.Status}}">{{.Status.Label}}{{if .SKDate}} {{.SKDate}}{{end}}</span>
+  {{end}}
+  {{if eq .Role "admin"}}<span class="tag-admin" title="Club admin">admin</span>{{end}}
+</a>
+{{end}}

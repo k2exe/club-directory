@@ -1,0 +1,49 @@
+{{define "content"}}
+{{$c := .Data}}
+<p class="crumb"><a href="/">← All members</a></p>
+
+<article class="sheet">
+  <div class="sheet-head">
+    {{if $c.PhotoFile}}
+      <img class="sheet-photo" src="/photo/{{$c.PhotoFile}}" alt="{{$c.Name}}">
+    {{else}}
+      <span class="sheet-photo sheet-photo-blank" aria-hidden="true">{{initials $c.Name}}</span>
+    {{end}}
+    <div>
+      <p class="sheet-call">{{if $c.CallSign}}{{$c.CallSign}}{{else}}—{{end}}</p>
+      <h1 class="sheet-name">{{$c.Name}}</h1>
+      <p class="sheet-status">
+        <span class="dot dot-{{$c.Status}}"></span>{{$c.Status.Label}}
+        {{if $c.SKDate}} · {{$c.SKDate}}{{end}}
+        {{if $c.StatusReason}} · {{$c.StatusReason}}{{end}}
+        {{if eq $c.Role "admin"}} · club admin{{end}}
+      </p>
+    </div>
+  </div>
+
+  {{if $c.HasContact}}
+  <dl class="facts">
+    {{if $c.Email}}<div><dt>Email</dt><dd><a href="mailto:{{$c.Email}}">{{$c.Email}}</a></dd></div>{{end}}
+    {{if $c.Phone}}<div><dt>Phone</dt><dd>{{$c.Phone}}</dd></div>{{end}}
+    {{if not $c.Address.Empty}}<div><dt>Address</dt><dd>{{$c.Address.OneLine}}</dd></div>{{end}}
+  </dl>
+  {{else}}
+  <p class="quiet">This member lists a name and call sign only.</p>
+  {{end}}
+
+  {{if $c.Self}}<p class="quiet"><a href="/account">Edit your details and sharing</a></p>{{end}}
+  {{if .Admin}}
+    <div class="adminbox">
+      <p><strong>Admin view</strong></p>
+      <dl class="facts">
+        <div><dt>Sign-in email</dt><dd>{{$c.LoginEmail}}</dd></div>
+        <div><dt>Joined</dt><dd>{{date $c.JoinedAt}}</dd></div>
+        <div><dt>Last signed in</dt><dd>{{maybeDate $c.LastLoginAt}}</dd></div>
+        <div><dt>Two-step</dt><dd>{{if $c.MFAOn}}on{{else}}off{{end}}</dd></div>
+      </dl>
+      {{if $c.AdminNotes}}<p class="quiet">{{$c.AdminNotes}}</p>{{end}}
+      <p><a class="btn btn-quiet" href="/admin/member/{{$c.ID}}">Manage this member</a></p>
+    </div>
+  {{end}}
+</article>
+{{end}}

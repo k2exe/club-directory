@@ -1,0 +1,24 @@
+{{define "content"}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<p class="eyebrow">Admin</p>
+<h1 class="page-title">Activity log</h1>
+<p class="lede">Sign-ins, roster changes and consent updates, newest first.</p>
+<div class="tablewrap">
+<table class="roster">
+  <thead><tr><th>When</th><th>Who</th><th>What</th><th>Detail</th><th>From</th></tr></thead>
+  <tbody>
+  {{range .Data}}
+    <tr>
+      <td class="small">{{datetime .At}}</td>
+      <td class="small mono">{{.Actor}}</td>
+      <td class="small"><code>{{.Action}}</code></td>
+      <td class="small">{{.Detail}}</td>
+      <td class="small mono">{{.IP}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="quiet">Nothing logged yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

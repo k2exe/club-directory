@@ -1,0 +1,28 @@
+{{define "content"}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<div class="narrow">
+<p class="eyebrow">Admin</p>
+<h1 class="page-title">Settings</h1>
+<form method="post" action="/admin/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="club">Club name</label>
+  <input id="club" name="club_name" value="{{.Data.ClubName}}" required>
+  <label for="call">Club call sign</label>
+  <input id="call" name="club_call_sign" value="{{.Data.ClubCallSign}}" class="mono" placeholder="W1AW">
+  <label for="tag">Tagline</label>
+  <input id="tag" name="tagline" value="{{.Data.Tagline}}">
+
+  <h3 class="sub">Who can see the directory</h3>
+  <label class="check"><input type="checkbox" name="public_directory" {{if .Data.PublicDirectory}}checked{{end}}>
+    <span>Anyone on the network can browse names and call signs without signing in</span></label>
+  <label class="check"><input type="checkbox" name="show_sk" {{if .Data.ShowSKPublicly}}checked{{end}}>
+    <span>Include silent keys in the public listing</span></label>
+  <label class="check"><input type="checkbox" name="show_former" {{if .Data.ShowFormerPub}}checked{{end}}>
+    <span>Include former members in the public listing</span></label>
+  <label class="check"><input type="checkbox" name="signups_open" {{if .Data.SignupsOpen}}checked{{end}}>
+    <span>Let people sign themselves up, pending admin approval</span></label>
+  <button class="btn" type="submit">Save settings</button>
+</form>
+<p class="quiet">Contact details are never public, whatever these settings say — signed-in members see only what each member has approved.</p>
+</div>
+{{end}}

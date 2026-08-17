@@ -1,0 +1,68 @@
+{{define "content"}}
+{{$d := .Data}}{{$m := $d.Me}}
+<p class="crumb"><a href="/account">← Your details</a></p>
+<p class="eyebrow">Sign-in security</p>
+
+{{if $d.BackupCodes}}
+  <h1 class="page-title">Save your backup codes</h1>
+  <p class="lede">Each code works once, if you cannot reach your authenticator. Print them or put them somewhere safe — they are not shown again.</p>
+  <ul class="codes">{{range $d.BackupCodes}}<li>{{.}}</li>{{end}}</ul>
+  <p><a class="btn" href="/account">Done</a></p>
+
+{{else if $d.Setup}}
+  <h1 class="page-title">Set up two-step verification</h1>
+  <div class="cols cols-narrow">
+    <div>
+      <ol class="steps">
+        <li>Scan this code with an authenticator app — Aegis, Google Authenticator, 1Password, whichever you use.</li>
+        <li>Can't scan? Enter the key by hand: <code class="key">{{$d.Grouped}}</code></li>
+        <li>Type the six-digit code it shows to confirm.</li>
+      </ol>
+      <form method="post" action="/account/security/enable" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="secret" value="{{$d.Secret}}">
+        <label for="code">Code from your app</label>
+        <input id="code" name="code" class="codefield" inputmode="numeric" autocomplete="one-time-code" required autofocus>
+        <button class="btn" type="submit">Turn on two-step verification</button>
+      </form>
+    </div>
+    <div class="qrbox">{{$d.QR}}</div>
+  </div>
+
+{{else}}
+  <h1 class="page-title">{{if $m.MFAOn}}Two-step verification is on{{else}}Add a second step{{end}}</h1>
+  {{if $d.Required}}
+    <p class="notice">Admin accounts must use two-step verification. It cannot be turned off while you hold the admin role.</p>
+  {{end}}
+  {{if $m.MFAOn}}
+    <p class="lede">After your email link, you enter a code from your authenticator app. Turned on {{date $m.TOTPEnabled}}.</p>
+    <div class="btnrow">
+      <form method="post" action="/account/security/codes">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn btn-quiet" type="submit">Generate new backup codes</button>
+      </form>
+      {{if not $d.Required}}
+      <form method="post" action="/account/security/disable">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="linkish danger" type="submit">Turn off two-step verification</button>
+      </form>
+      {{end}}
+    </div>
+  {{else}}
+    <p class="lede">Right now anyone who can read your email can sign in as you. An authenticator code closes that gap. Members can choose; admins must have it.</p>
+    <form method="post" action="/account/security/start">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn" type="submit">Set up two-step verification</button>
+    </form>
+  {{end}}
+
+  <section class="panel">
+    <h2 class="panel-title">Signed in elsewhere?</h2>
+    <p class="quiet">This signs out every browser and phone, including this one.</p>
+    <form method="post" action="/account/sessions/revoke">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="linkish danger" type="submit">Sign out everywhere</button>
+    </form>
+  </section>
+{{end}}
+{{end}}
