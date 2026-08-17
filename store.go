@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -11,8 +12,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // ---------- domain types ----------
@@ -154,24 +156,68 @@ type Settings struct {
 	ShowFormerPub   bool   `json:"show_former_publicly"`
 }
 
-type data struct {
-	Version  int       `json:"version"`
-	Secret   string    `json:"secret"` // base64 HMAC key for cookies
-	Settings Settings  `json:"settings"`
-	Members  []*Member `json:"members"`
-}
-
 // ---------- store ----------
+//
+// Structured data (roster, settings, the cookie signing key) lives in a
+// SQLite database at <dir>/directory.db. Photos and spooled mail stay as
+// plain files on disk, as before — only the record store moved.
 
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	dir  string
-	d    *data
+	db  *sql.DB
+	dir string
 }
 
 var ErrNotFound = errors.New("not found")
 var ErrDuplicate = errors.New("email already on the roster")
+
+const schema = `
+CREATE TABLE IF NOT EXISTS meta (
+	id                INTEGER PRIMARY KEY CHECK (id = 1),
+	version           INTEGER NOT NULL,
+	secret            TEXT NOT NULL,
+	club_name         TEXT NOT NULL,
+	club_call_sign    TEXT NOT NULL,
+	tagline           TEXT NOT NULL,
+	public_directory  INTEGER NOT NULL,
+	signups_open      INTEGER NOT NULL,
+	show_sk_publicly  INTEGER NOT NULL,
+	show_former_pub   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS members (
+	id                 TEXT PRIMARY KEY,
+	email              TEXT NOT NULL UNIQUE,
+	name               TEXT NOT NULL DEFAULT '',
+	call_sign          TEXT NOT NULL DEFAULT '',
+	role               TEXT NOT NULL,
+	status             TEXT NOT NULL,
+	status_reason      TEXT NOT NULL DEFAULT '',
+	status_changed_at  TEXT NOT NULL,
+	sk_date            TEXT NOT NULL DEFAULT '',
+	contact_email      TEXT NOT NULL DEFAULT '',
+	phone              TEXT NOT NULL DEFAULT '',
+	address_line1      TEXT NOT NULL DEFAULT '',
+	address_line2      TEXT NOT NULL DEFAULT '',
+	address_city       TEXT NOT NULL DEFAULT '',
+	address_state      TEXT NOT NULL DEFAULT '',
+	address_postal     TEXT NOT NULL DEFAULT '',
+	photo_file         TEXT NOT NULL DEFAULT '',
+	share_email        INTEGER NOT NULL DEFAULT 0,
+	share_phone        INTEGER NOT NULL DEFAULT 0,
+	share_address      INTEGER NOT NULL DEFAULT 0,
+	share_photo        INTEGER NOT NULL DEFAULT 0,
+	needs_review       INTEGER NOT NULL DEFAULT 0,
+	totp_secret        TEXT NOT NULL DEFAULT '',
+	totp_enabled_at    TEXT,
+	totp_last_step     INTEGER NOT NULL DEFAULT 0,
+	backup_codes       TEXT NOT NULL DEFAULT '[]',
+	session_epoch      INTEGER NOT NULL DEFAULT 0,
+	admin_notes        TEXT NOT NULL DEFAULT '',
+	joined_at          TEXT NOT NULL,
+	updated_at         TEXT NOT NULL,
+	last_login_at      TEXT
+);
+`
 
 func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "photos"), 0o700); err != nil {
@@ -180,80 +226,176 @@ func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "outbox"), 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, "directory.json"), dir: dir}
-	b, err := os.ReadFile(s.path)
-	switch {
-	case err == nil:
-		s.d = &data{}
-		if err := json.Unmarshal(b, s.d); err != nil {
-			return nil, fmt.Errorf("reading %s: %w", s.path, err)
-		}
-	case os.IsNotExist(err):
-		key := make([]byte, 32)
-		if _, err := rand.Read(key); err != nil {
-			return nil, err
-		}
-		s.d = &data{
-			Version: 1,
-			Secret:  base64.StdEncoding.EncodeToString(key),
-			Settings: Settings{
-				ClubName:        "Club Directory",
-				Tagline:         "Members and call signs",
-				PublicDirectory: true,
-				SignupsOpen:     false,
-				ShowSKPublicly:  true,
-			},
-		}
-		if err := s.save(); err != nil {
-			return nil, err
-		}
-	default:
+	dsn := filepath.Join(dir, "directory.db") + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", dsn, err)
+	}
+	// The roster is a few hundred rows at most; one connection avoids
+	// SQLITE_BUSY entirely and gives every Store method the same
+	// read-your-writes consistency the old single-mutex JSON store had.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enabling WAL: %w", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
+	s := &Store{db: db, dir: dir}
+	if err := s.ensureMeta(); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// save assumes the caller holds the write lock (or is in construction).
-func (s *Store) save() error {
-	b, err := json.MarshalIndent(s.d, "", "  ")
-	if err != nil {
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) ensureMeta() error {
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM meta WHERE id = 1").Scan(&n); err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if n > 0 {
+		return nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	set := Settings{
+		ClubName:        "Club Directory",
+		Tagline:         "Members and call signs",
+		PublicDirectory: true,
+		SignupsOpen:     false,
+		ShowSKPublicly:  true,
+	}
+	_, err := s.db.Exec(`INSERT INTO meta
+		(id, version, secret, club_name, club_call_sign, tagline, public_directory, signups_open, show_sk_publicly, show_former_pub)
+		VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		base64.StdEncoding.EncodeToString(key),
+		set.ClubName, set.ClubCallSign, set.Tagline,
+		boolToInt(set.PublicDirectory), boolToInt(set.SignupsOpen),
+		boolToInt(set.ShowSKPublicly), boolToInt(set.ShowFormerPub))
+	return err
 }
 
 func (s *Store) Secret() []byte {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	b, _ := base64.StdEncoding.DecodeString(s.d.Secret)
+	var secret string
+	if err := s.db.QueryRow("SELECT secret FROM meta WHERE id = 1").Scan(&secret); err != nil {
+		return nil
+	}
+	b, _ := base64.StdEncoding.DecodeString(secret)
 	return b
 }
 
 func (s *Store) Settings() Settings {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.d.Settings
+	var set Settings
+	var pub, signups, sk, former int
+	err := s.db.QueryRow(`SELECT club_name, club_call_sign, tagline, public_directory, signups_open, show_sk_publicly, show_former_pub
+		FROM meta WHERE id = 1`).Scan(&set.ClubName, &set.ClubCallSign, &set.Tagline, &pub, &signups, &sk, &former)
+	if err != nil {
+		return Settings{}
+	}
+	set.PublicDirectory = pub != 0
+	set.SignupsOpen = signups != 0
+	set.ShowSKPublicly = sk != 0
+	set.ShowFormerPub = former != 0
+	return set
 }
 
 func (s *Store) SaveSettings(set Settings) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.d.Settings
-	s.d.Settings = set
-	if err := s.save(); err != nil {
-		s.d.Settings = prev
-		return err
-	}
-	return nil
+	_, err := s.db.Exec(`UPDATE meta SET club_name = ?, club_call_sign = ?, tagline = ?,
+		public_directory = ?, signups_open = ?, show_sk_publicly = ?, show_former_pub = ? WHERE id = 1`,
+		set.ClubName, set.ClubCallSign, set.Tagline,
+		boolToInt(set.PublicDirectory), boolToInt(set.SignupsOpen),
+		boolToInt(set.ShowSKPublicly), boolToInt(set.ShowFormerPub))
+	return err
 }
 
 func (s *Store) PhotoDir() string  { return filepath.Join(s.dir, "photos") }
 func (s *Store) OutboxDir() string { return filepath.Join(s.dir, "outbox") }
 func (s *Store) Dir() string       { return s.dir }
+
+// ---------- row <-> Member mapping ----------
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanMember(row scanner) (*Member, error) {
+	var m Member
+	var statusChangedAt, joinedAt, updatedAt string
+	var totpEnabledAt, lastLoginAt sql.NullString
+	var backupCodes string
+	var shareEmail, sharePhone, shareAddress, sharePhoto, needsReview int
+
+	err := row.Scan(
+		&m.ID, &m.Email, &m.Name, &m.CallSign, &m.Role,
+		&m.Status, &m.StatusReason, &statusChangedAt, &m.SKDate,
+		&m.ContactEmail, &m.Phone,
+		&m.Address.Line1, &m.Address.Line2, &m.Address.City, &m.Address.State, &m.Address.Postal,
+		&m.PhotoFile,
+		&shareEmail, &sharePhone, &shareAddress, &sharePhoto, &needsReview,
+		&m.TOTPSecret, &totpEnabledAt, &m.TOTPLastStep, &backupCodes, &m.SessionEpoch,
+		&m.AdminNotes, &joinedAt, &updatedAt, &lastLoginAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	m.StatusChangedAt = parseTime(statusChangedAt)
+	m.JoinedAt = parseTime(joinedAt)
+	m.UpdatedAt = parseTime(updatedAt)
+	if totpEnabledAt.Valid {
+		t := parseTime(totpEnabledAt.String)
+		m.TOTPEnabled = &t
+	}
+	if lastLoginAt.Valid {
+		t := parseTime(lastLoginAt.String)
+		m.LastLoginAt = &t
+	}
+	m.Share = Share{Email: shareEmail != 0, Phone: sharePhone != 0, Address: shareAddress != 0, Photo: sharePhoto != 0}
+	m.NeedsReview = needsReview != 0
+	if backupCodes != "" {
+		_ = json.Unmarshal([]byte(backupCodes), &m.BackupCodes)
+	}
+	return &m, nil
+}
+
+// memberCols is the single source of truth for member column order: SELECT,
+// INSERT and UPDATE all derive their column lists from this slice, so it is
+// impossible for scanMember, values() and the write statements to drift.
+var memberCols = []string{
+	"id", "email", "name", "call_sign", "role",
+	"status", "status_reason", "status_changed_at", "sk_date",
+	"contact_email", "phone",
+	"address_line1", "address_line2", "address_city", "address_state", "address_postal",
+	"photo_file",
+	"share_email", "share_phone", "share_address", "share_photo", "needs_review",
+	"totp_secret", "totp_enabled_at", "totp_last_step", "backup_codes", "session_epoch",
+	"admin_notes", "joined_at", "updated_at", "last_login_at",
+}
+
+var memberColumns = strings.Join(memberCols, ", ")
+
+// insertArgs and updateArgs share the same column order (minus id, which is
+// fixed on insert and never changes on update).
+func (m *Member) values() []any {
+	codes, _ := json.Marshal(m.BackupCodes)
+	return []any{
+		m.Email, m.Name, m.CallSign, m.Role,
+		m.Status, m.StatusReason, formatTime(m.StatusChangedAt), m.SKDate,
+		m.ContactEmail, m.Phone,
+		m.Address.Line1, m.Address.Line2, m.Address.City, m.Address.State, m.Address.Postal,
+		m.PhotoFile,
+		boolToInt(m.Share.Email), boolToInt(m.Share.Phone), boolToInt(m.Share.Address), boolToInt(m.Share.Photo),
+		boolToInt(m.NeedsReview),
+		m.TOTPSecret, nullableTime(m.TOTPEnabled), m.TOTPLastStep, string(codes), m.SessionEpoch,
+		m.AdminNotes, formatTime(m.JoinedAt), formatTime(m.UpdatedAt), nullableTime(m.LastLoginAt),
+	}
+}
 
 // clone returns a copy so callers can never mutate store state by accident.
 func clone(m *Member) *Member {
@@ -263,66 +405,61 @@ func clone(m *Member) *Member {
 }
 
 func (s *Store) All() []*Member {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*Member, 0, len(s.d.Members))
-	for _, m := range s.d.Members {
-		out = append(out, clone(m))
+	rows, err := s.db.Query("SELECT " + memberColumns + " FROM members")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []*Member{}
+	for rows.Next() {
+		m, err := scanMember(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SortKey() < out[j].SortKey() })
 	return out
 }
 
 func (s *Store) ByID(id string) (*Member, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, m := range s.d.Members {
-		if m.ID == id {
-			return clone(m), nil
-		}
+	row := s.db.QueryRow("SELECT "+memberColumns+" FROM members WHERE id = ?", id)
+	m, err := scanMember(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-	return nil, ErrNotFound
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func (s *Store) ByEmail(email string) (*Member, error) {
-	email = normalizeEmail(email)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, m := range s.d.Members {
-		if m.Email == email {
-			return clone(m), nil
-		}
+	row := s.db.QueryRow("SELECT "+memberColumns+" FROM members WHERE email = ?", normalizeEmail(email))
+	m, err := scanMember(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-	return nil, ErrNotFound
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func (s *Store) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.d.Members)
+	var n int
+	s.db.QueryRow("SELECT COUNT(*) FROM members").Scan(&n)
+	return n
 }
 
 func (s *Store) AdminCount() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	n := 0
-	for _, m := range s.d.Members {
-		if m.Role == RoleAdmin && m.Status == StatusActive {
-			n++
-		}
-	}
+	var n int
+	s.db.QueryRow("SELECT COUNT(*) FROM members WHERE role = ? AND status = ?", RoleAdmin, StatusActive).Scan(&n)
 	return n
 }
 
 func (s *Store) Create(m *Member) (*Member, error) {
 	m.Email = normalizeEmail(m.Email)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range s.d.Members {
-		if e.Email == m.Email {
-			return nil, ErrDuplicate
-		}
-	}
 	if m.ID == "" {
 		m.ID = newID()
 	}
@@ -332,64 +469,61 @@ func (s *Store) Create(m *Member) (*Member, error) {
 	}
 	m.UpdatedAt = now
 	m.StatusChangedAt = now
-	s.d.Members = append(s.d.Members, m)
-	if err := s.save(); err != nil {
-		s.d.Members = s.d.Members[:len(s.d.Members)-1] // keep memory and disk in step
+
+	args := append([]any{m.ID}, m.values()...)
+	_, err := s.db.Exec(`INSERT INTO members (id, `+memberColumnsNoID()+`) VALUES (`+placeholders(len(args))+`)`, args...)
+	if isUniqueViolation(err) {
+		return nil, ErrDuplicate
+	}
+	if err != nil {
 		return nil, err
 	}
 	return clone(m), nil
 }
 
-// Update applies fn to the live record under lock, then persists.
+// Update fetches the live record, applies fn, then persists. SetMaxOpenConns(1)
+// gives this the same read-modify-write atomicity the old global mutex did.
 func (s *Store) Update(id string, fn func(*Member) error) (*Member, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, m := range s.d.Members {
-		if m.ID != id {
-			continue
-		}
-		before := *m
-		if err := fn(m); err != nil {
-			*m = before
-			return nil, err
-		}
-		if m.Email != before.Email {
-			m.Email = normalizeEmail(m.Email)
-			for _, o := range s.d.Members {
-				if o.ID != id && o.Email == m.Email {
-					*m = before
-					return nil, ErrDuplicate
-				}
-			}
-		}
-		m.UpdatedAt = time.Now()
-		if err := s.save(); err != nil {
-			*m = before
-			return nil, err
-		}
-		return clone(m), nil
+	m, err := s.ByID(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, ErrNotFound
+	before := *m
+	if err := fn(m); err != nil {
+		return nil, err
+	}
+	if m.Email != before.Email {
+		m.Email = normalizeEmail(m.Email)
+	}
+	m.UpdatedAt = time.Now()
+
+	args := append(m.values(), m.ID)
+	_, err = s.db.Exec(`UPDATE members SET `+memberSetClause()+` WHERE id = ?`, args...)
+	if isUniqueViolation(err) {
+		return nil, ErrDuplicate
+	}
+	if err != nil {
+		return nil, err
+	}
+	return clone(m), nil
 }
 
 func (s *Store) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, m := range s.d.Members {
-		if m.ID == id {
-			kept := append([]*Member(nil), s.d.Members...)
-			s.d.Members = append(s.d.Members[:i:i], s.d.Members[i+1:]...)
-			if err := s.save(); err != nil {
-				s.d.Members = kept
-				return err
-			}
-			if m.PhotoFile != "" { // only after the record is really gone
-				os.Remove(filepath.Join(s.dir, "photos", m.PhotoFile))
-			}
-			return nil
-		}
+	m, err := s.ByID(id)
+	if err != nil {
+		return err
 	}
-	return ErrNotFound
+	res, err := s.db.Exec("DELETE FROM members WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if m.PhotoFile != "" { // only after the record is really gone
+		os.Remove(filepath.Join(s.dir, "photos", m.PhotoFile))
+	}
+	return nil
 }
 
 // ---------- visibility ----------
@@ -614,4 +748,53 @@ func randToken(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+func parseTime(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s)
+	return t
+}
+
+func nullableTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return formatTime(*t)
+}
+
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// memberColumnsNoID, placeholders and memberSetClause keep the INSERT/UPDATE
+// statements in the same column order as Member.values(), without repeating
+// that order by hand in three places.
+func memberColumnsNoID() string {
+	return strings.Join(memberCols[1:], ", ") // drop "id"
+}
+
+func placeholders(n int) string {
+	p := make([]string, n)
+	for i := range p {
+		p[i] = "?"
+	}
+	return strings.Join(p, ", ")
+}
+
+func memberSetClause() string {
+	cols := memberCols[1:] // drop "id"
+	set := make([]string, len(cols))
+	for i, c := range cols {
+		set[i] = c + " = ?"
+	}
+	return strings.Join(set, ", ")
 }

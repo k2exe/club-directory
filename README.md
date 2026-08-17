@@ -173,15 +173,19 @@ location /auth/ { access_log off; proxy_pass http://127.0.0.1:8080; }
 
 ```
 data/
-  directory.json   roster, settings, and the cookie signing key
+  directory.db     SQLite database: roster, settings, and the cookie signing key
+  directory.db-wal   \_ WAL journal files (present while the app is running)
+  directory.db-shm   /
   photos/          member photos
   outbox/          spooled mail when no relay is configured
   audit.log        append-only JSONL
 ```
 
-`directory.json` holds the HMAC key that signs session cookies, so treat it as a
+`directory.db` holds the HMAC key that signs session cookies, so treat it as a
 secret and keep the directory at mode 700. Deleting it signs everyone out and
-loses the roster.
+loses the roster. Back up the whole `data/` directory, not just `directory.db`
+on its own — while the app is running, uncommitted writes can live in the
+`-wal` file rather than the main database file.
 
 ## Building and testing
 
@@ -196,17 +200,19 @@ found in review: an unenrolled admin reading admin-only fields through routes
 outside the admin middleware; a pending sign-up reading members' shared details;
 and an admin edit republishing a field under consent given for the old value.
 
-`go.mod` declares `go 1.22` as the minimum language version, not a pin — build
-releases with a **current, patched Go toolchain**, because the standard library
-is the whole dependency surface here. Add `govulncheck ./...` to your release
-step; it reports reachable standard-library vulnerabilities as well as
-third-party ones.
+`go.mod` declares the minimum Go language version, not a pin — build releases
+with a **current, patched Go toolchain**. The roster store depends on
+[`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite), a pure-Go SQLite
+driver, so the binary still has no cgo requirement and no external database
+server; everything else is standard library. Add `govulncheck ./...` to your
+release step; it reports reachable vulnerabilities in that dependency as well
+as the standard library.
 
 ## Notes and limits
 
-- The roster lives in memory and is written to a single JSON file on change,
-  which is the right shape for the few hundred members a club has. It is not
-  sized for tens of thousands.
+- The roster lives in a SQLite database (`directory.db`) with a single
+  connection, which is the right shape for the few hundred members a club
+  has. It is not sized for tens of thousands.
 - Sessions are stateless signed cookies with a per-member epoch, so they survive
   a restart, and "sign out everywhere" works by bumping that epoch. Pending
   magic links are held in memory and are dropped by a restart — request a new one.
@@ -228,7 +234,7 @@ third-party ones.
 
 ```
 main.go       config, routing, template loading
-store.go      data model, JSON store, and the audience projection rules
+store.go      data model, SQLite-backed store, and the audience projection rules
 auth.go       signed cookies, CSRF, magic links, rate limiting, audit log
 totp.go       RFC 6238 codes and backup codes
 qr.go         QR encoder (byte mode, ECC L, versions 1-9)

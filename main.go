@@ -119,6 +119,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+	store.Close()
 	log.Print("stopped")
 }
 
