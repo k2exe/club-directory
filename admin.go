@@ -70,6 +70,7 @@ func (a *App) handleAdminCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Write(me.Email, "admin.member_add", m.ID, m.Email, a.clientIP(r))
+	a.notifyStaffNewMember(m)
 	if r.FormValue("send_invite") != "" {
 		a.sendLink(m, "invite", "")
 		a.ok(w, r, "Member added and an invitation link is on its way.", "/admin/member/"+m.ID)

@@ -233,6 +233,7 @@ func (a *App) handleLoginRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.audit.Write(email, "member.signup", m.ID, "self sign-up", a.clientIP(r))
+		a.notifyStaffNewMember(m)
 		a.sendLink(m, "signup", next)
 	case err == nil && accessOf(m) != AccessNone:
 		a.sendLink(m, "login", next)

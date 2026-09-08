@@ -21,6 +21,9 @@
       {{if $c.StaffRole}}
       <p class="sheet-tags"><span class="tag-staff {{$c.StaffRole.CSSClass}}">{{$c.StaffRole.Label}}</span></p>
       {{end}}
+      {{if and $c.StaffRole .Me (not $c.Self)}}
+      <p class="sheet-actions"><a class="btn btn-quiet" href="/support?topic={{$c.StaffRole}}">Request support</a></p>
+      {{end}}
     </div>
   </div>
 

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +106,113 @@ func TestStaffRoles(t *testing.T) {
 	if len(holders) != 1 || holders[0].CallSign != "W9XYZ" {
 		t.Fatalf("ByStaffRole: got %d holders, want 1 (W9XYZ)", len(holders))
 	}
+}
+
+func TestStaffNotificationsAndSupport(t *testing.T) {
+	a := testApp(t)
+	set := a.store.Settings()
+	set.SignupsOpen = true
+	a.store.SaveSettings(set)
+
+	echomanager := mustCreate(t, a, &Member{Email: "echolink@t.local", Name: "Echo Manager", CallSign: "W1ECHO", Status: StatusActive, StaffRole: StaffEcholink})
+	webmaster := mustCreate(t, a, &Member{Email: "web@t.local", Name: "Web Manager", CallSign: "W2WEB", Status: StatusActive, StaffRole: StaffWebsite})
+	plain := mustCreate(t, a, &Member{Email: "plain@t.local", Name: "Plain Member", CallSign: "W3PLN", Status: StatusActive})
+
+	// A new member added by an admin triggers a notification to the Echolink Manager only.
+	newbie := mustCreate(t, a, &Member{Email: "new@t.local", Name: "New Person", CallSign: "W4NEW", Status: StatusActive})
+	a.notifyStaffNewMember(newbie)
+	out, err := a.store.OutboxDir(), error(nil)
+	mail, merr := readOutbox(a)
+	if merr != nil || len(mail) != 1 {
+		t.Fatalf("expected 1 outbox mail for the echolink manager, got %d (err %v)", len(mail), merr)
+	}
+	if !strings.Contains(mail[0], "echolink@t.local") || !strings.Contains(mail[0], "W4NEW") {
+		t.Fatalf("notification missing recipient or new member: %.200s", mail[0])
+	}
+
+	// Support request from a plain member routes to the right role holder.
+	form := url.Values{"topic": {"website"}, "message": {"The roster page is broken"}}
+	if rec := a.post(t, "/support", form, plain); rec.Code != 303 {
+		t.Fatalf("support submit: got %d: %s", rec.Code, rec.Body.String())
+	}
+	mail = readOutboxMust(t, a)
+	if !strings.Contains(mail[len(mail)-1], "web@t.local") || !strings.Contains(mail[len(mail)-1], "roster page is broken") {
+		t.Fatalf("support request misrouted: %.300s", mail[len(mail)-1])
+	}
+
+	// A member cannot file a request against their own role.
+	if rec := a.post(t, "/support", url.Values{"topic": {"echolink"}, "message": {"hi"}}, echomanager); rec.Code != 303 {
+		t.Fatalf("self-topic should still 303, got %d", rec.Code)
+	}
+	if n := countOutbox(t, a, "echolink@t.local", "Support request"); n != 0 {
+		t.Fatalf("self-topic should not email the requester's own role, got %d", n)
+	}
+
+	// Unfilled topic is rejected; no holder produces a clear failure.
+	if rec := a.post(t, "/support", url.Values{"topic": {"aredn-mesh"}, "message": {"mesh down"}}, plain); rec.Code != 303 {
+		t.Fatalf("no-holder request: got %d", rec.Code)
+	}
+	if n := countOutbox(t, a, "", "aredn-mesh"); n != 0 {
+		t.Fatalf("request with no holders must not send mail, got %d", n)
+	}
+
+	// The support page offers topics and excludes the viewer's own role.
+	page := a.get(t, "/support", webmaster)
+	body := page.Body.String()
+	if !strings.Contains(body, "value=\"echolink\"") || strings.Contains(body, "value=\"website\"") {
+		t.Fatalf("topic list wrong for webmaster: own topic should be excluded")
+	}
+
+	// Profiles of staff show the support button to other signed-in members.
+	prof := a.get(t, "/m/"+echomanager.ID, plain)
+	if !strings.Contains(prof.Body.String(), "/support?topic=echolink") {
+		t.Fatalf("profile missing support button")
+	}
+	// ...but not on one's own profile.
+	profSelf := a.get(t, "/m/"+echomanager.ID, echomanager)
+	if strings.Contains(profSelf.Body.String(), "/support?topic=") {
+		t.Fatalf("own profile should not show a support button")
+	}
+
+	_ = out
+	_ = err
+}
+
+func readOutbox(a *App) ([]string, error) {
+	entries, err := os.ReadDir(a.store.OutboxDir())
+	if err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".eml") {
+			b, err := os.ReadFile(filepath.Join(a.store.OutboxDir(), e.Name()))
+			if err == nil {
+				out = append(out, string(b))
+			}
+		}
+	}
+	return out, nil
+}
+
+func readOutboxMust(t *testing.T, a *App) []string {
+	t.Helper()
+	mail, err := readOutbox(a)
+	if err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	return mail
+}
+
+func countOutbox(t *testing.T, a *App, recipient, fragment string) int {
+	t.Helper()
+	n := 0
+	for _, m := range readOutboxMust(t, a) {
+		if (recipient == "" || strings.Contains(m, "To: "+recipient)) && strings.Contains(m, fragment) {
+			n++
+		}
+	}
+	return n
 }
 
 // ---------- access policy ----------

@@ -1,0 +1,21 @@
+{{define "content"}}
+{{$d := .Data}}
+<p class="crumb"><a href="/">← All members</a></p>
+
+<section class="panel" style="max-width:40rem">
+  <h1 class="page-title">Request support</h1>
+  <p class="quiet">Pick the area you need help with. Your request goes by email to the member holding that role.</p>
+  <form method="post" action="/support" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="topic">What do you need help with?</label>
+    <select id="topic" name="topic" required>
+      {{range $d.Topics}}
+      <option value="{{.Role}}" {{if eq (printf "%s" .Role) (printf "%s" $.Query.Get "topic")}}selected{{end}}>{{.Label}}</option>
+      {{end}}
+    </select>
+    <label for="message">Message</label>
+    <textarea id="message" name="message" rows="6" required placeholder="Describe what you need help with"></textarea>
+    <button class="btn" type="submit">Send request</button>
+  </form>
+</section>
+{{end}}

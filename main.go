@@ -241,6 +241,10 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /account/security/codes", a.requireMember(a.handleNewBackupCodes))
 	mux.HandleFunc("POST /account/sessions/revoke", a.requireMember(a.handleRevokeSessions))
 
+	// Support requests — signed-in members only, routed to staff role holders
+	mux.HandleFunc("GET /support", a.requireMember(a.handleSupportForm))
+	mux.HandleFunc("POST /support", a.requireMember(a.handleSupportSubmit))
+
 	// Admin
 	mux.HandleFunc("GET /admin", a.requireAdmin(a.handleAdminRoster))
 	mux.HandleFunc("GET /admin/new", a.requireAdmin(a.handleAdminNewForm))
