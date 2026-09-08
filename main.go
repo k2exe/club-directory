@@ -177,7 +177,21 @@ func (a *App) loadTemplates() error {
 		"lower":      strings.ToLower,
 		"statuses":   func() []Status { return allStatuses },
 		"staffRoles": func() []StaffRole { return allStaffRoles },
-		"eq3":        func(a, b string) bool { return a == b },
+		"recurs":     func() []Recur { return allRecurs },
+		"dayNames":   func() []string { return []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"} },
+		"inWeekdays": func(ds []time.Weekday, name string) bool {
+			d, ok := weekdayByShort[name]
+			if !ok {
+				return false
+			}
+			for _, x := range ds {
+				if x == d {
+					return true
+				}
+			}
+			return false
+		},
+		"eq3": func(a, b string) bool { return a == b },
 	}
 	pages, err := fs.Glob(webFS, "web/templates/pages/*.html")
 	if err != nil {
@@ -233,6 +247,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /account", a.requireMember(a.handleAccountSave))
 	mux.HandleFunc("POST /account/sharing", a.requireMember(a.handleSharingSave))
 	mux.HandleFunc("POST /account/photo", a.requireMember(a.handlePhotoUpload))
+	mux.HandleFunc("POST /account/netremind", a.requireMember(a.handleNetRemindOptIn))
 	mux.HandleFunc("POST /account/photo/remove", a.requireMember(a.handlePhotoRemove))
 	mux.HandleFunc("GET /account/security", a.requireMember(a.handleSecurity))
 	mux.HandleFunc("POST /account/security/start", a.requireMember(a.handleMFAStart))
@@ -244,6 +259,16 @@ func (a *App) routes() http.Handler {
 	// Support requests — signed-in members only, routed to staff role holders
 	mux.HandleFunc("GET /support", a.requireMember(a.handleSupportForm))
 	mux.HandleFunc("POST /support", a.requireMember(a.handleSupportSubmit))
+
+	// NetRemind — nets listing for all signed-in members, scheduling for net admins
+	mux.HandleFunc("GET /nets", a.requireMember(a.handleNets))
+	mux.HandleFunc("POST /nets/{id}/subscribe", a.requireMember(a.handleNetSubscribe))
+	mux.HandleFunc("POST /nets/{id}/unsubscribe", a.requireMember(a.handleNetUnsubscribe))
+	mux.HandleFunc("GET /nets/new", requireNetAdmin(a, a.handleNetNewForm))
+	mux.HandleFunc("POST /nets/new", requireNetAdmin(a, a.handleNetCreate))
+	mux.HandleFunc("GET /nets/{id}/edit", requireNetAdmin(a, a.handleNetEditForm))
+	mux.HandleFunc("POST /nets/{id}/edit", requireNetAdmin(a, a.handleNetSave))
+	mux.HandleFunc("POST /nets/{id}/delete", requireNetAdmin(a, a.handleNetDelete))
 
 	// Admin
 	mux.HandleFunc("GET /admin", a.requireAdmin(a.handleAdminRoster))

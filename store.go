@@ -66,10 +66,11 @@ const (
 	StaffWebsite   StaffRole = "website"
 	StaffEcholink  StaffRole = "echolink"
 	StaffArednMesh StaffRole = "aredn-mesh"
+	StaffNetAdmin  StaffRole = "netadmin"
 	StaffNone      StaffRole = ""
 )
 
-var allStaffRoles = []StaffRole{StaffWebsite, StaffEcholink, StaffArednMesh}
+var allStaffRoles = []StaffRole{StaffWebsite, StaffEcholink, StaffArednMesh, StaffNetAdmin}
 
 // Label returns the display name shown on the profile tag.
 func (s StaffRole) Label() string {
@@ -80,6 +81,8 @@ func (s StaffRole) Label() string {
 		return "Echolink Manager"
 	case StaffArednMesh:
 		return "AREDN Mesh Manager"
+	case StaffNetAdmin:
+		return "Net Admin"
 	}
 	return string(s)
 }
@@ -157,6 +160,7 @@ type Member struct {
 	Share        Share     `json:"share"`
 	NeedsReview  bool      `json:"needs_review"`
 	StaffRole    StaffRole `json:"staff_role,omitempty"` // club responsibility, e.g. website manager
+	NetRemind    bool      `json:"net_remind,omitempty"` // opted in to net reminder emails
 
 	// Authentication.
 	TOTPSecret   string     `json:"totp_secret,omitempty"`
@@ -268,6 +272,8 @@ CREATE TABLE IF NOT EXISTS members (
 var migrations = []string{
 	// v1 -> v2: staff roles (website / echolink / aredn-mesh manager)
 	`ALTER TABLE members ADD COLUMN staff_role TEXT NOT NULL DEFAULT ''`,
+	// v3: netremind opt-in
+	`ALTER TABLE members ADD COLUMN net_remind INTEGER NOT NULL DEFAULT 0`,
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -301,6 +307,10 @@ func OpenStore(dir string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("migration %q: %w", m, err)
 		}
+	}
+	if err := openNetTables(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("net tables: %w", err)
 	}
 	s := &Store{db: db, dir: dir}
 	if err := s.ensureMeta(); err != nil {
@@ -390,6 +400,7 @@ func scanMember(row scanner) (*Member, error) {
 	var totpEnabledAt, lastLoginAt sql.NullString
 	var backupCodes string
 	var shareEmail, sharePhone, shareAddress, sharePhoto, needsReview int
+	var netRemind int
 
 	err := row.Scan(
 		&m.ID, &m.Email, &m.Name, &m.CallSign, &m.Role,
@@ -400,7 +411,7 @@ func scanMember(row scanner) (*Member, error) {
 		&shareEmail, &sharePhone, &shareAddress, &sharePhoto, &needsReview,
 		&m.TOTPSecret, &totpEnabledAt, &m.TOTPLastStep, &backupCodes, &m.SessionEpoch,
 		&m.AdminNotes, &joinedAt, &updatedAt, &lastLoginAt,
-		&m.StaffRole,
+		&m.StaffRole, &netRemind,
 	)
 	if err != nil {
 		return nil, err
@@ -417,6 +428,7 @@ func scanMember(row scanner) (*Member, error) {
 		m.LastLoginAt = &t
 	}
 	m.Share = Share{Email: shareEmail != 0, Phone: sharePhone != 0, Address: shareAddress != 0, Photo: sharePhoto != 0}
+	m.NetRemind = netRemind != 0
 	m.NeedsReview = needsReview != 0
 	if backupCodes != "" {
 		_ = json.Unmarshal([]byte(backupCodes), &m.BackupCodes)
@@ -436,7 +448,7 @@ var memberCols = []string{
 	"share_email", "share_phone", "share_address", "share_photo", "needs_review",
 	"totp_secret", "totp_enabled_at", "totp_last_step", "backup_codes", "session_epoch",
 	"admin_notes", "joined_at", "updated_at", "last_login_at",
-	"staff_role",
+	"staff_role", "net_remind",
 }
 
 var memberColumns = strings.Join(memberCols, ", ")
@@ -455,7 +467,7 @@ func (m *Member) values() []any {
 		boolToInt(m.NeedsReview),
 		m.TOTPSecret, nullableTime(m.TOTPEnabled), m.TOTPLastStep, string(codes), m.SessionEpoch,
 		m.AdminNotes, formatTime(m.JoinedAt), formatTime(m.UpdatedAt), nullableTime(m.LastLoginAt),
-		m.StaffRole,
+		m.StaffRole, boolToInt(m.NetRemind),
 	}
 }
 

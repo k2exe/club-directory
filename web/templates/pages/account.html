@@ -48,6 +48,17 @@
   </section>
 
   <div>
+  <section class="panel panel-consent">
+    <h2 class="panel-title">NetRemind</h2>
+    <p class="quiet">Get an email reminder for club nets. Onboarding step: opt in once, then pick the nets you want on the <a href="/nets">Club nets</a> page.</p>
+    <form method="post" action="/account/netremind" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label class="check"><input type="checkbox" name="net_remind" {{if $m.NetRemind}}checked{{end}}>
+        <span>Email me about club nets (NetRemind)</span></label>
+      <button class="btn" type="submit">Save NetRemind choice</button>
+    </form>
+    <p class="quiet"><a href="/nets">Manage which nets you are reminded about →</a></p>
+  </section>
     <section class="panel panel-consent">
       <h2 class="panel-title">What the club can see</h2>
       <p class="quiet">Each box you tick shares that detail with signed-in members. Untick to take it back at any time. Admins can always see everything on your record.</p>

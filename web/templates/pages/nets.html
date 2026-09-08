@@ -1,0 +1,57 @@
+{{define "content"}}
+{{$d := .Data}}
+<p class="crumb"><a href="/">← All members</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow">NetRemind</p>
+    <h1 class="page-title">Club nets</h1>
+    <p class="quiet">Scheduled nets and their reminders.
+      {{if $d.NetRemind}}NetRemind is <b>on</b> for you.{{else}}NetRemind is <b>off</b> —
+      <a href="/account">opt in on your details page</a> to subscribe.{{end}}</p>
+  </div>
+  {{if $d.IsNetAdmin}}<a class="btn" href="/nets/new">Schedule a net</a>{{end}}
+</div>
+
+{{if not $d.Nets}}
+<section class="panel">
+  <p class="quiet">No nets scheduled yet.{{if $d.IsNetAdmin}} Use “Schedule a net” to add the first one.{{end}}</p>
+</section>
+{{end}}
+
+{{range $d.Nets}}
+<section class="panel">
+  <div class="headrow">
+    <div>
+      <h2 class="panel-title" style="margin:0">{{.Name}}</h2>
+      <p class="quiet">{{.Describe}} · next: {{if .Next}}{{.Next}}{{else}}—{{end}}</p>
+      {{if .Description}}<p>{{.Description}}</p>{{end}}
+      <p class="quiet">{{.SubCount}} subscribed</p>
+    </div>
+    <div class="stack">
+      {{if $d.NetRemind}}
+        {{if .Subscribed}}
+        <form method="post" action="/nets/{{.ID}}/unsubscribe">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="btn btn-quiet" type="submit">Unsubscribe</button>
+        </form>
+        {{else}}
+        <form method="post" action="/nets/{{.ID}}/subscribe">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="btn" type="submit">Remind me</button>
+        </form>
+        {{end}}
+      {{else}}
+        <a class="btn btn-quiet" href="/account">Opt in to get reminders</a>
+      {{end}}
+      {{if $d.IsNetAdmin}}
+      <a class="btn btn-quiet" href="/nets/{{.ID}}/edit">Edit</a>
+      <form method="post" action="/nets/{{.ID}}/delete">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button class="linkish danger" type="submit">Delete</button>
+      </form>
+      {{end}}
+    </div>
+  </div>
+</section>
+{{end}}
+{{end}}

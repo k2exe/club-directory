@@ -455,6 +455,33 @@ func (a *App) handleSharingSave(w http.ResponseWriter, r *http.Request) {
 	a.ok(w, r, "Sharing preferences saved.", "/account")
 }
 
+// handleNetRemindOptIn is the NetRemind opt-in step of onboarding.
+func (a *App) handleNetRemindOptIn(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	on := r.FormValue("net_remind") != ""
+	_, err := a.store.Update(me.ID, func(x *Member) error {
+		x.NetRemind = on
+		return nil
+	})
+	if err != nil {
+		a.fail(w, r, "Could not save your NetRemind choice.", "/account")
+		return
+	}
+	a.audit.Write(me.Email, "netremind.optin", me.ID, fmtBool(on), a.clientIP(r))
+	msg := "NetRemind is off. You can turn it back on at any time."
+	if on {
+		msg = "NetRemind is on. Pick your nets on the Club nets page."
+	}
+	a.ok(w, r, msg, "/account")
+}
+
+func fmtBool(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
 func (a *App) handlePhotoUpload(w http.ResponseWriter, r *http.Request) {
 	m := a.current(r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBody)

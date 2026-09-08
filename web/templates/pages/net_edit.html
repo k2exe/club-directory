@@ -1,0 +1,63 @@
+{{define "content"}}
+{{$n := .Data.Net}}
+<p class="crumb"><a href="/nets">← Club nets</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow">NetAdmin</p>
+    <h1 class="page-title">{{if $n.ID}}Edit net{{else}}Schedule a net{{end}}</h1>
+  </div>
+</div>
+
+<section class="panel" style="max-width:40rem">
+  <form method="post" action="{{if $n.ID}}/nets/{{$n.ID}}/edit{{else}}/nets/new{{end}}" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="name">Net name</label>
+    <input id="name" name="name" value="{{$n.Name}}" required placeholder="Tuesday Night Net">
+
+    <label for="description">Description <span class="quiet">(optional, included in reminders)</span></label>
+    <textarea id="description" name="description" rows="3">{{$n.Description}}</textarea>
+
+    <label for="recur">Repeats</label>
+    <select id="recur" name="recur">
+      {{range recurs}}
+      <option value="{{.}}" {{if eq (printf "%s" .) (printf "%s" $n.Recur)}}selected{{end}}>{{.Label}}</option>
+      {{end}}
+    </select>
+
+    <h3 class="sub">Day(s)</h3>
+    <p class="quiet">Used by Weekly, Every-N-weeks and Monthly; ignored by Daily / Weekdays / Weekends.</p>
+    <div class="row">
+      {{range dayNames}}
+      <label class="check"><input type="checkbox" name="weekday" value="{{.}}"
+        {{if inWeekdays $n.Weekdays .}}checked{{end}}><span>{{.}}</span></label>
+      {{end}}
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="every_n_weeks">Every N weeks <span class="quiet">(Every-N-weeks only)</span></label>
+        <input id="every_n_weeks" name="every_n_weeks" type="number" min="1" max="12" value="{{$n.EveryNWeeks}}" class="mono">
+      </div>
+      <div>
+        <label for="nth_week">Which occurrence <span class="quiet">(Monthly)</span></label>
+        <select id="nth_week" name="nth_week">
+          <option value="1" {{if eq $n.NthWeek 1}}selected{{end}}>First</option>
+          <option value="2" {{if eq $n.NthWeek 2}}selected{{end}}>Second</option>
+          <option value="3" {{if eq $n.NthWeek 3}}selected{{end}}>Third</option>
+          <option value="4" {{if eq $n.NthWeek 4}}selected{{end}}>Fourth</option>
+          <option value="5" {{if eq $n.NthWeek 5}}selected{{end}}>Last</option>
+        </select>
+      </div>
+      <div>
+        <label for="local_time">Start time (local, 24h)</label>
+        <input id="local_time" name="local_time" value="{{$n.LocalTime}}" placeholder="19:30" class="mono" required>
+      </div>
+    </div>
+
+    <label class="check"><input type="checkbox" name="active" {{if $n.Active}}checked{{end}}>
+      <span>Active (reminders are sent while active)</span></label>
+
+    <button class="btn" type="submit">{{if $n.ID}}Save net{{else}}Schedule net{{end}}</button>
+  </form>
+</section>
+{{end}}
