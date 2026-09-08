@@ -50,6 +50,53 @@ services:
       internal:
         ipv4_address: 172.28.1.20
 
+  # NetRemind scheduler: one-shot reminder runs on a cron schedule inside
+  # the container, sharing the same SQLite database (read + outbox writes)
+  # as the app. Busy timeout + single connection keep concurrent access
+  # safe; reminders only email opted-in subscribers.
+  netremind:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: club-directory:latest
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    # CD_REMIND_ONLY makes the binary send today's reminders and exit;
+    # cron re-invokes it each morning at CRON_REMIND_TIME (container local
+    # time — set TZ to match your club).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "netremind scheduler starting; reminders at ${CRON_REMIND_TIME:-07:00} (${TZ:-UTC})"
+        while true; do
+          # seconds until the next CRON_REMIND_TIME
+          now=$$(date +%s)
+          target=$$(date -d "today ${CRON_REMIND_TIME:-07:00}" +%s)
+          if [ "$$target" -le "$$now" ]; then target=$$(date -d "tomorrow ${CRON_REMIND_TIME:-07:00}" +%s); fi
+          sleep $$((target - now))
+          echo "running net reminders at $$(date)"
+          CD_REMIND_ONLY=1 /usr/local/bin/clubdir || echo "reminder run failed; will retry tomorrow"
+          # sleep past the minute so a fast exit cannot double-fire
+          sleep 60
+        done
+    environment:
+      CD_DATA: /data
+      TZ: "${TZ:-UTC}"
+      CD_SMTP_HOST: "${SMTP_HOST:-}"
+      CD_SMTP_PORT: "${SMTP_PORT:-25}"
+      CD_SMTP_USER: "${SMTP_USER:-}"
+      CD_SMTP_PASS: "${SMTP_PASS:-}"
+      CD_SMTP_FROM: "${SMTP_FROM:-club-directory@localhost}"
+      CD_SMTP_STARTTLS: "${SMTP_STARTTLS:-}"
+      CD_SMTP_INSECURE: "${SMTP_INSECURE:-}"
+    volumes:
+      - clubdir-data:/data
+    networks:
+      internal:
+        ipv4_address: 172.28.1.30
+
 networks:
   internal:
     driver: bridge

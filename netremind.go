@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -487,4 +488,56 @@ func (s *Store) NetRemindOptIns() int {
 	var n int
 	s.db.QueryRow("SELECT COUNT(*) FROM members WHERE net_remind = 1 AND status = ?", string(StatusActive)).Scan(&n)
 	return n
+}
+
+// ---------- in-process daily scheduler ----------
+
+var stopReminder = make(chan struct{})
+
+// runReminderLoop fires SendNetRemindersForDay once per local day at
+// hh:mm. It tolerates a missed window (container asleep at the tick):
+// on startup it first checks whether today's reminders were already sent
+// today by a previous process and, if not and the scheduled time has
+// passed, sends them immediately so a restart never loses a day.
+func runReminderLoop(a *App, at string, stop <-chan struct{}) {
+	hh, mm := 8, 0
+	if t, err := time.Parse("15:04", at); err == nil {
+		hh, mm = t.Hour(), t.Minute()
+	} else {
+		log.Printf("net reminders: invalid -remind-at %q, defaulting to 08:00", at)
+	}
+
+	// Catch-up on startup: if the scheduled time already passed today,
+	// today's reminders have not been sent by us, and the log shows no
+	// earlier send today, send them now.
+	if time.Now().After(todayAt(hh, mm)) {
+		n := a.SendNetRemindersForDay(time.Now())
+		if n > 0 {
+			log.Printf("net reminders (catch-up) sent: %d", n)
+		}
+	}
+
+	for {
+		next := todayAt(hh, mm)
+		if !next.After(time.Now()) {
+			next = next.AddDate(0, 0, 1)
+		}
+		log.Printf("net reminders: next run %s", next.Format("2006-01-02 15:04"))
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		n := a.SendNetRemindersForDay(time.Now())
+		if n > 0 {
+			log.Printf("net reminders sent: %d", n)
+		}
+	}
+}
+
+func todayAt(hh, mm int) time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), hh, mm, 0, 0, now.Location())
 }

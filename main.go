@@ -28,6 +28,8 @@ type Config struct {
 	SecureCookies bool
 	Bootstrap     string
 	EchoMail      bool
+	RemindOnly    bool   // send today's net reminders and exit (cron mode)
+	RemindAt      string // daily HH:MM in-process reminder schedule (empty = off)
 }
 
 type App struct {
@@ -51,6 +53,8 @@ func main() {
 	flag.BoolVar(&cfg.SecureCookies, "secure-cookies", envOr("CD_SECURE_COOKIES", "") != "", "set the Secure flag on cookies (enable when behind HTTPS)")
 	flag.StringVar(&cfg.Bootstrap, "bootstrap-admin", envOr("CD_BOOTSTRAP_ADMIN", ""), "email address to create as an admin on startup if absent")
 	flag.BoolVar(&cfg.EchoMail, "echo-mail", envOr("CD_ECHO_MAIL", "") != "", "also print outgoing mail to the log")
+	flag.BoolVar(&cfg.RemindOnly, "remind-only", envOr("CD_REMIND_ONLY", "") != "", "send today's net reminders and exit (for cron)")
+	flag.StringVar(&cfg.RemindAt, "remind-at", envOr("CD_REMIND_AT", ""), "send net reminders daily at HH:MM local (in-process scheduler; empty = off)")
 	flag.StringVar(&mail.Host, "smtp-host", envOr("CD_SMTP_HOST", ""), "SMTP relay host (leave empty to write mail to data/outbox)")
 	flag.IntVar(&mail.Port, "smtp-port", envInt("CD_SMTP_PORT", 25), "SMTP port")
 	flag.StringVar(&mail.User, "smtp-user", envOr("CD_SMTP_USER", ""), "SMTP username")
@@ -103,6 +107,19 @@ func main() {
 
 	if strings.HasPrefix(cfg.BaseURL, "https://") && !cfg.SecureCookies {
 		log.Print("WARNING: base URL is https but -secure-cookies is off; cookies will be sent over plain HTTP too")
+	}
+	if cfg.RemindOnly {
+		// One-shot mode for a cron container: send today's net reminders
+		// and exit. Not an HTTP server; exits 0 even when nothing is due.
+		n := app.SendNetRemindersForDay(time.Now())
+		log.Printf("net reminders sent for %s: %d", time.Now().Format("2006-01-02"), n)
+		store.Close()
+		return
+	}
+	if cfg.RemindAt != "" {
+		// Long-lived mode: run the reminder loop in-process.
+		go runReminderLoop(app, cfg.RemindAt, stopReminder)
+		log.Printf("net reminders scheduled daily at %s", cfg.RemindAt)
 	}
 	go func() {
 		log.Printf("club directory listening on http://%s (links use %s)", cfg.Addr, cfg.BaseURL)

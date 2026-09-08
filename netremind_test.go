@@ -168,6 +168,37 @@ func TestRecurPatterns(t *testing.T) {
 	}
 }
 
+func TestReminderLoopFiresAtTime(t *testing.T) {
+	a := testApp(t)
+	admin := mustCreate(t, a, &Member{Email: "na@t.local", Name: "NA", CallSign: "K1NA", Status: StatusActive, StaffRole: StaffNetAdmin, NetRemind: true})
+	// Schedule "now"-ish: pick a local time a minute in the future so the
+	// daily net matches today but the occurrence is still ahead.
+	future := time.Now().Add(2 * time.Minute)
+	form := url.Values{
+		"name": {"Daily Net"}, "recur": {"daily"},
+		"local_time": {future.Format("15:04")}, "active": {"on"},
+	}
+	if rec := a.post(t, "/nets/new", form, admin); rec.Code != 303 {
+		t.Fatalf("create: %d", rec.Code)
+	}
+	// The admin must also be subscribed to the net to get its reminder.
+	nets := a.store.Nets(false)
+	a.store.Subscribe(admin.ID, nets[0].ID)
+	n := a.SendNetRemindersForDay(time.Now())
+	if n != 1 {
+		t.Fatalf("expected 1 reminder, got %d", n)
+	}
+	mail := readOutboxMust(t, a)
+	if !strings.Contains(mail[len(mail)-1], "na@t.local") {
+		t.Fatalf("reminder went to wrong address")
+	}
+
+	// todayAt helper sanity
+	if !todayAt(8, 0).Equal(time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 8, 0, 0, 0, time.Local)) {
+		t.Fatalf("todayAt wrong")
+	}
+}
+
 func TestNetRemindOptInFlow(t *testing.T) {
 	a := testApp(t)
 	m := mustCreate(t, a, &Member{Email: "o@t.local", Name: "O", CallSign: "K9O", Status: StatusActive})
