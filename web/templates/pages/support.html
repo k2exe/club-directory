@@ -10,7 +10,7 @@
     <label for="topic">What do you need help with?</label>
     <select id="topic" name="topic" required>
       {{range $d.Topics}}
-      <option value="{{.Role}}" {{if eq (printf "%s" .Role) (printf "%s" $.Query.Get "topic")}}selected{{end}}>{{.Label}}</option>
+      <option value="{{.Role}}" {{if eq (printf "%s" .Role) (printf "%s" $d.Preselect)}}selected{{end}}>{{.Label}}</option>
       {{end}}
     </select>
     <label for="message">Message</label>

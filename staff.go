@@ -89,7 +89,8 @@ func (a *App) supportTopicsForViewer(viewer *Member) []supportTopic {
 func (a *App) handleSupportForm(w http.ResponseWriter, r *http.Request) {
 	me := a.current(r)
 	a.render(w, r, "support", "Request support", map[string]any{
-		"Topics": a.supportTopicsForViewer(me),
+		"Topics":     a.supportTopicsForViewer(me),
+		"Preselect":  StaffRole(r.URL.Query().Get("topic")),
 	})
 }
 
