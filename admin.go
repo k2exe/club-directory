@@ -130,6 +130,14 @@ func (a *App) handleAdminSave(w http.ResponseWriter, r *http.Request) {
 		x.Role = newRole
 		x.AdminNotes = strings.TrimSpace(r.FormValue("admin_notes"))
 
+		// Staff responsibility (website / echolink / aredn-mesh manager).
+		// Empty or invalid input clears the role.
+		if sr := StaffRole(r.FormValue("staff_role")); validStaffRole(sr) {
+			x.StaffRole = sr
+		} else {
+			x.StaffRole = StaffNone
+		}
+
 		if v := normalizeEmail(r.FormValue("contact_email")); v != x.ContactEmail {
 			x.ContactEmail, x.Share.Email, touched = v, false, true
 		}

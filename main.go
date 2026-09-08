@@ -173,10 +173,11 @@ func (a *App) loadTemplates() error {
 			}
 			return t.Format("2 Jan 2006")
 		},
-		"initials": initials,
-		"lower":    strings.ToLower,
-		"statuses": func() []Status { return allStatuses },
-		"eq3":      func(a, b string) bool { return a == b },
+		"initials":   initials,
+		"lower":      strings.ToLower,
+		"statuses":   func() []Status { return allStatuses },
+		"staffRoles": func() []StaffRole { return allStaffRoles },
+		"eq3":        func(a, b string) bool { return a == b },
 	}
 	pages, err := fs.Glob(webFS, "web/templates/pages/*.html")
 	if err != nil {

@@ -57,6 +57,50 @@ const (
 	RoleAdmin  Role = "admin"
 )
 
+// StaffRole is a responsibility a member holds in the club, on top of their
+// member/admin role. An empty string means none. Holding one shows a tag on
+// the member's profile and (PR 2) routes support requests to that person.
+type StaffRole string
+
+const (
+	StaffWebsite   StaffRole = "website"
+	StaffEcholink  StaffRole = "echolink"
+	StaffArednMesh StaffRole = "aredn-mesh"
+	StaffNone      StaffRole = ""
+)
+
+var allStaffRoles = []StaffRole{StaffWebsite, StaffEcholink, StaffArednMesh}
+
+// Label returns the display name shown on the profile tag.
+func (s StaffRole) Label() string {
+	switch s {
+	case StaffWebsite:
+		return "Website Manager"
+	case StaffEcholink:
+		return "Echolink Manager"
+	case StaffArednMesh:
+		return "AREDN Mesh Manager"
+	}
+	return string(s)
+}
+
+// CSSClass is the colored tag class used in templates.
+func (s StaffRole) CSSClass() string {
+	if s == StaffNone {
+		return ""
+	}
+	return "tag-staff-" + string(s)
+}
+
+func validStaffRole(s StaffRole) bool {
+	for _, x := range allStaffRoles {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 type Address struct {
 	Line1  string `json:"line1"`
 	Line2  string `json:"line2"`
@@ -106,12 +150,13 @@ type Member struct {
 	SKDate          string    `json:"sk_date,omitempty"`
 
 	// Optional directory information.
-	ContactEmail string  `json:"contact_email"`
-	Phone        string  `json:"phone"`
-	Address      Address `json:"address"`
-	PhotoFile    string  `json:"photo_file"`
-	Share        Share   `json:"share"`
-	NeedsReview  bool    `json:"needs_review"`
+	ContactEmail string    `json:"contact_email"`
+	Phone        string    `json:"phone"`
+	Address      Address   `json:"address"`
+	PhotoFile    string    `json:"photo_file"`
+	Share        Share     `json:"share"`
+	NeedsReview  bool      `json:"needs_review"`
+	StaffRole    StaffRole `json:"staff_role,omitempty"` // club responsibility, e.g. website manager
 
 	// Authentication.
 	TOTPSecret   string     `json:"totp_secret,omitempty"`
@@ -219,6 +264,12 @@ CREATE TABLE IF NOT EXISTS members (
 );
 `
 
+// migrations runs schema changes for databases created by older versions.
+var migrations = []string{
+	// v1 -> v2: staff roles (website / echolink / aredn-mesh manager)
+	`ALTER TABLE members ADD COLUMN staff_role TEXT NOT NULL DEFAULT ''`,
+}
+
 func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "photos"), 0o700); err != nil {
 		return nil, err
@@ -242,6 +293,14 @@ func OpenStore(dir string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
+	for _, m := range migrations {
+		// Migrations are idempotent: an already-applied ALTER TABLE fails
+		// harmlessly (duplicate column) and everything else is fatal.
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("migration %q: %w", m, err)
+		}
 	}
 	s := &Store{db: db, dir: dir}
 	if err := s.ensureMeta(); err != nil {
@@ -341,6 +400,7 @@ func scanMember(row scanner) (*Member, error) {
 		&shareEmail, &sharePhone, &shareAddress, &sharePhoto, &needsReview,
 		&m.TOTPSecret, &totpEnabledAt, &m.TOTPLastStep, &backupCodes, &m.SessionEpoch,
 		&m.AdminNotes, &joinedAt, &updatedAt, &lastLoginAt,
+		&m.StaffRole,
 	)
 	if err != nil {
 		return nil, err
@@ -376,6 +436,7 @@ var memberCols = []string{
 	"share_email", "share_phone", "share_address", "share_photo", "needs_review",
 	"totp_secret", "totp_enabled_at", "totp_last_step", "backup_codes", "session_epoch",
 	"admin_notes", "joined_at", "updated_at", "last_login_at",
+	"staff_role",
 }
 
 var memberColumns = strings.Join(memberCols, ", ")
@@ -394,6 +455,7 @@ func (m *Member) values() []any {
 		boolToInt(m.NeedsReview),
 		m.TOTPSecret, nullableTime(m.TOTPEnabled), m.TOTPLastStep, string(codes), m.SessionEpoch,
 		m.AdminNotes, formatTime(m.JoinedAt), formatTime(m.UpdatedAt), nullableTime(m.LastLoginAt),
+		m.StaffRole,
 	}
 }
 
@@ -456,6 +518,25 @@ func (s *Store) AdminCount() int {
 	var n int
 	s.db.QueryRow("SELECT COUNT(*) FROM members WHERE role = ? AND status = ?", RoleAdmin, StatusActive).Scan(&n)
 	return n
+}
+
+// ByStaffRole returns every member holding a given staff role, ordered by
+// call sign. Used to route notifications and support requests (PR 2).
+func (s *Store) ByStaffRole(role StaffRole) []*Member {
+	rows, err := s.db.Query("SELECT "+memberColumns+" FROM members WHERE staff_role = ? AND status = ? ORDER BY call_sign", role, StatusActive)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []*Member{}
+	for rows.Next() {
+		m, err := scanMember(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *Store) Create(m *Member) (*Member, error) {
@@ -606,6 +687,7 @@ type Card struct {
 	Address      Address
 	PhotoFile    string
 	Self         bool
+	StaffRole    StaffRole
 	// admin-only extras
 	LoginEmail  string
 	AdminNotes  string
@@ -623,6 +705,11 @@ func (c Card) HasContact() bool {
 func visible(m *Member, viewer *Member, set Settings) bool {
 	if viewer != nil && viewer.ID == m.ID {
 		return true
+	}
+	// A staff role is itself listing-worthy: the club needs to show who
+	// manages the website, Echolink or the mesh even for a bare record.
+	if audienceFor(viewer) == AudPublic && m.StaffRole != StaffNone {
+		return set.PublicDirectory && m.Status.Listable()
 	}
 	if audienceFor(viewer) != AudAdmin && m.Name == "" && m.CallSign == "" {
 		return false // nothing to list yet; don't advertise a half-filled record
@@ -652,13 +739,14 @@ func project(m *Member, viewer *Member) Card {
 	self := viewer != nil && viewer.ID == m.ID
 	aud := audienceFor(viewer)
 	c := Card{
-		ID:       m.ID,
-		Name:     m.Name,
-		CallSign: m.CallSign,
-		Status:   m.Status,
-		SKDate:   m.SKDate,
-		Role:     m.Role,
-		Self:     self,
+		ID:        m.ID,
+		Name:      m.Name,
+		CallSign:  m.CallSign,
+		Status:    m.Status,
+		SKDate:    m.SKDate,
+		Role:      m.Role,
+		StaffRole: m.StaffRole,
+		Self:      self,
 	}
 	// Name and call sign are the default share, and all anyone browsing
 	// anonymously ever gets. Opted-in details go to signed-in members only;

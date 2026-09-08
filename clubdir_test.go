@@ -68,6 +68,44 @@ func (a *App) post(t *testing.T, path string, form url.Values, as *Member) *http
 	return rec
 }
 
+func TestStaffRoles(t *testing.T) {
+	a := testApp(t)
+	admin := mustCreate(t, a, &Member{Email: "admin@t.local", Role: RoleAdmin, Status: StatusActive, TOTPEnabled: enrolled()})
+
+	// Assigning a staff role persists and shows on the profile for every audience.
+	target := mustCreate(t, a, &Member{Email: "w7abc@t.local", Name: "Pat Doe", CallSign: "W7ABC", Status: StatusActive, StaffRole: StaffEcholink})
+	form := url.Values{"staff_role": {"echolink"}}
+	if rec := a.post(t, "/admin/member/"+target.ID, form, admin); rec.Code != 303 {
+		t.Fatalf("assign staff role: got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err := a.store.ByID(target.ID)
+	if err != nil || got.StaffRole != StaffEcholink {
+		t.Fatalf("staff role not persisted: %+v err=%v", got, err)
+	}
+
+	// Anonymous visitor sees the colored tag on the profile page.
+	rec := a.get(t, "/m/"+target.ID, nil)
+	if !strings.Contains(rec.Body.String(), "tag-staff-echolink") || !strings.Contains(rec.Body.String(), "Echolink Manager") {
+		t.Fatalf("profile missing staff tag: %s", rec.Body.String())
+	}
+
+	// Invalid value clears the role.
+	if rec := a.post(t, "/admin/member/"+target.ID, url.Values{"staff_role": {"banana"}}, admin); rec.Code != 303 {
+		t.Fatalf("invalid staff role: got %d", rec.Code)
+	}
+	if got, _ = a.store.ByID(target.ID); got.StaffRole != StaffNone {
+		t.Fatalf("invalid staff role should clear, got %q", got.StaffRole)
+	}
+
+	// ByStaffRole returns only active holders.
+	mustCreate(t, a, &Member{Email: "w9xyz@t.local", CallSign: "W9XYZ", Status: StatusActive, StaffRole: StaffEcholink})
+	mustCreate(t, a, &Member{Email: "n0old@t.local", CallSign: "N0OLD", Status: StatusFormer, StaffRole: StaffEcholink})
+	holders := a.store.ByStaffRole(StaffEcholink)
+	if len(holders) != 1 || holders[0].CallSign != "W9XYZ" {
+		t.Fatalf("ByStaffRole: got %d holders, want 1 (W9XYZ)", len(holders))
+	}
+}
+
 // ---------- access policy ----------
 
 func TestAccessMatrix(t *testing.T) {

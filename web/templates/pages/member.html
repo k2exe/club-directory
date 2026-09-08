@@ -18,6 +18,9 @@
         {{if $c.StatusReason}} · {{$c.StatusReason}}{{end}}
         {{if eq $c.Role "admin"}} · club admin{{end}}
       </p>
+      {{if $c.StaffRole}}
+      <p class="sheet-tags"><span class="tag-staff {{$c.StaffRole.CSSClass}}">{{$c.StaffRole.Label}}</span></p>
+      {{end}}
     </div>
   </div>
 

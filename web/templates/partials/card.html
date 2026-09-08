@@ -17,5 +17,6 @@
     <span class="stamp stamp-{{.Status}}">{{.Status.Label}}{{if .SKDate}} {{.SKDate}}{{end}}</span>
   {{end}}
   {{if eq .Role "admin"}}<span class="tag-admin" title="Club admin">admin</span>{{end}}
+  {{if .StaffRole}}<span class="tag-staff {{.StaffRole.CSSClass}}" title="{{.StaffRole.Label}}">{{.StaffRole.Label}}</span>{{end}}
 </a>
 {{end}}

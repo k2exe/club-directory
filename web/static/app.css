@@ -231,6 +231,18 @@ button.searchbar-btn, .searchbar button { background: var(--ink); color: var(--c
 .tag-review { color: var(--signal); border-color: var(--signal); }
 .qsl .tag-admin { position: absolute; bottom: .7rem; right: .8rem; margin: 0; }
 
+/* staff role tags — one color per responsibility */
+.tag-staff {
+  display: inline-block; font-family: var(--mono); font-size: .6rem;
+  text-transform: uppercase; letter-spacing: .12em; padding: 0 .35rem;
+  border: 1px solid currentColor; vertical-align: middle;
+}
+.tag-staff-website    { color: #1d6fb8; }
+.tag-staff-echolink   { color: #7a4d9f; }
+.tag-staff-aredn-mesh { color: #b3611d; }
+.qsl .tag-staff { position: absolute; bottom: .7rem; left: .8rem; margin: 0; }
+.sheet-tags { margin: .2rem 0 0; }
+
 /* ---------- member sheet ---------- */
 
 .sheet {

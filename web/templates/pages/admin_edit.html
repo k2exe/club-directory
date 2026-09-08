@@ -28,6 +28,13 @@
       </select>
       {{if .Data.LastAdmin}}<p class="quiet">This is the only admin, so the role is locked until someone else is promoted.</p>{{end}}
 
+      <label for="staff_role">Staff responsibility</label>
+      <select id="staff_role" name="staff_role">
+        <option value="">None</option>
+        {{range staffRoles}}<option value="{{.}}" {{if eq (printf "%s" .) (printf "%s" $m.StaffRole)}}selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+      <p class="quiet">Shows as a colored tag on this member's profile and routes support requests for that area to them.</p>
+
       <h3 class="sub">Contact details</h3>
       <p class="quiet">You can record these, but they stay hidden from other members until {{if $m.Name}}{{$m.Name}}{{else}}the member{{end}} approves sharing them.</p>
       <div class="row">
