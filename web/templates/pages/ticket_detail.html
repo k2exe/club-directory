@@ -1,0 +1,38 @@
+{{define "content"}}
+{{$t := .Data.Ticket}}
+<p class="crumb"><a href="/tickets">← Tickets</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow"><span class="tag-role role-{{$t.RoleID}}">{{.Data.RoleName}}</span></p>
+    <h1 class="page-title">{{$t.Subject}}</h1>
+  </div>
+  <span class="ticket-status ticket-status-{{$t.Status}}">{{$t.Status.Label}}</span>
+</div>
+
+<div class="thread">
+  {{range .Data.Messages}}
+  <div class="msg {{if eq .AuthorID $.Me.ID}}msg-self{{end}}">
+    <div class="msg-head"><span>{{if .AuthorName}}{{.AuthorName}}{{else}}(removed member){{end}}</span><span>{{datetime .CreatedAt}}</span></div>
+    <p class="msg-body">{{.Body}}</p>
+  </div>
+  {{else}}
+  <p class="quiet">No messages yet.</p>
+  {{end}}
+</div>
+
+{{if .Data.CanReply}}
+<section class="panel">
+  <h2 class="panel-title">Reply</h2>
+  <form method="post" action="/tickets/{{$t.ID}}/reply" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="body">Message <span class="quiet">(optional if you are only changing the status)</span></label>
+    <textarea id="body" name="body" rows="5"></textarea>
+    <label for="status">Status</label>
+    <select id="status" name="status">
+      {{range ticketStatuses}}<option value="{{.}}" {{if eq (printf "%s" .) (printf "%s" $t.Status)}}selected{{end}}>{{.Label}}</option>{{end}}
+    </select>
+    <button class="btn" type="submit">Send</button>
+  </form>
+</section>
+{{end}}
+{{end}}

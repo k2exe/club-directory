@@ -8,19 +8,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
 
 type page struct {
-	Title string
-	Me    *Member
-	Set   Settings
-	CSRF  string
-	Flash *flashMsg
-	Path  string
-	Admin bool // true only for an enrolled, active admin
-	Data  any
+	Title       string
+	Me          *Member
+	Set         Settings
+	CSRF        string
+	Flash       *flashMsg
+	Path        string
+	Admin       bool // true only for an enrolled, active admin
+	RosterSight bool // active members and enrolled admins: can see /nets
+	Data        any
 }
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, name, title string, data any) {
@@ -31,14 +33,15 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name, title string,
 	}
 	me := a.current(r)
 	p := page{
-		Title: title,
-		Me:    me,
-		Admin: accessOf(me) == AccessAdmin,
-		Set:   a.store.Settings(),
-		CSRF:  a.csrfToken(w, r),
-		Flash: a.takeFlash(w, r),
-		Path:  r.URL.Path,
-		Data:  data,
+		Title:       title,
+		Me:          me,
+		Admin:       accessOf(me) == AccessAdmin,
+		RosterSight: accessOf(me) >= AccessMember,
+		Set:         a.store.Settings(),
+		CSRF:        a.csrfToken(w, r),
+		Flash:       a.takeFlash(w, r),
+		Path:        r.URL.Path,
+		Data:        data,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.Execute(w, p); err != nil {
@@ -91,6 +94,32 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 	return a.requireMember(func(w http.ResponseWriter, r *http.Request) {
 		if accessOf(a.current(r)) != AccessAdmin {
 			http.Error(w, "Admins only.", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	})
+}
+
+// requireNetAdmin allows full Admins, plus anyone holding a custom role that
+// grants net scheduling — "net admin" is a capability, not a primary role.
+func (a *App) requireNetAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return a.requireMember(func(w http.ResponseWriter, r *http.Request) {
+		me := a.current(r)
+		if accessOf(me) != AccessAdmin && !a.store.GrantsNetAdmin(me.ID) {
+			http.Error(w, "Net scheduling access only.", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	})
+}
+
+// requireRosterSight allows only members who can currently see the roster
+// (active members and enrolled admins) — the same line accessOf already
+// draws between AccessMember/AccessAdmin and AccessSelf.
+func (a *App) requireRosterSight(h http.HandlerFunc) http.HandlerFunc {
+	return a.requireMember(func(w http.ResponseWriter, r *http.Request) {
+		if accessOf(a.current(r)) < AccessMember {
+			http.Error(w, "Not available until your account is active.", http.StatusForbidden)
 			return
 		}
 		h(w, r)
@@ -233,6 +262,7 @@ func (a *App) handleLoginRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.audit.Write(email, "member.signup", m.ID, "self sign-up", a.clientIP(r))
+		a.notifyLifecycle("signed themselves up", m, "pending approval")
 		a.sendLink(m, "signup", next)
 	case err == nil && accessOf(m) != AccessNone:
 		a.sendLink(m, "login", next)
@@ -454,6 +484,43 @@ func (a *App) handleSharingSave(w http.ResponseWriter, r *http.Request) {
 	a.ok(w, r, "Sharing preferences saved.", "/account")
 }
 
+// validLeadMinutes are the only reminder lead times NetRemind offers.
+var validLeadMinutes = []int{60, 30, 15, 10, 5, 1}
+
+func (a *App) handleNetRemindSave(w http.ResponseWriter, r *http.Request) {
+	m := a.current(r)
+	optIn := r.FormValue("net_remind_opt_in") != ""
+	lead, _ := parseIntOr(r.FormValue("net_remind_lead"), 0)
+	valid := false
+	for _, v := range validLeadMinutes {
+		if v == lead {
+			valid = true
+		}
+	}
+	if !valid {
+		lead = 15
+	}
+	_, err := a.store.Update(m.ID, func(x *Member) error {
+		x.NetRemindOptIn = optIn
+		x.NetRemindLeadMinutes = lead
+		return nil
+	})
+	if err != nil {
+		a.fail(w, r, "Could not save your NetRemind preference.", "/account")
+		return
+	}
+	a.ok(w, r, "NetRemind preference saved.", "/account")
+}
+
+func parseIntOr(s string, def int) (int, error) {
+	n := def
+	_, err := fmt.Sscanf(s, "%d", &n)
+	if err != nil {
+		return def, err
+	}
+	return n, nil
+}
+
 func (a *App) handlePhotoUpload(w http.ResponseWriter, r *http.Request) {
 	m := a.current(r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBody)
@@ -613,4 +680,160 @@ func (a *App) handleRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	a.clearCookie(w, cookieSession)
 	a.audit.Write(m.Email, "session.revoke_all", m.ID, "", a.clientIP(r))
 	a.ok(w, r, "Signed out everywhere. Sign in again when you are ready.", "/login")
+}
+
+// ---------- nets ----------
+
+type netRow struct {
+	Net
+	Next         time.Time
+	RepeaterName string
+}
+
+func (a *App) handleNetsList(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	now := time.Now()
+	var rows []netRow
+	for _, n := range a.store.Nets() {
+		occ, ok := nextOccurrenceOnOrAfter(n, now)
+		if !ok {
+			continue // a one-off net whose time has passed
+		}
+		row := netRow{Net: n, Next: occ}
+		if n.RepeaterID != "" {
+			if rp, err := a.store.RepeaterByID(n.RepeaterID); err == nil {
+				row.RepeaterName = rp.Name
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Next.Before(rows[j].Next) })
+	a.render(w, r, "nets", "Nets", struct {
+		Rows      []netRow
+		CanManage bool
+	}{rows, accessOf(me) == AccessAdmin || a.store.GrantsNetAdmin(me.ID)})
+}
+
+// ---------- tickets ----------
+
+type ticketRow struct {
+	Ticket
+	RoleName  string
+	RoleColor string
+}
+
+func (a *App) decorateTicket(t Ticket) ticketRow {
+	row := ticketRow{Ticket: t}
+	if role, err := a.store.CustomRoleByID(t.RoleID); err == nil {
+		row.RoleName = role.Name
+		row.RoleColor = role.Color
+	}
+	return row
+}
+
+type ticketsData struct {
+	Mine   []ticketRow
+	Queues map[string][]ticketRow // role name -> tickets I support
+	Roles  []CustomRole
+}
+
+func (a *App) handleTicketsList(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	mine := []ticketRow{}
+	for _, t := range a.store.TicketsForMember(me.ID) {
+		mine = append(mine, a.decorateTicket(t))
+	}
+	queues := map[string][]ticketRow{}
+	roles := a.store.RolesFor(me.ID)
+	if accessOf(me) == AccessAdmin {
+		roles = a.store.CustomRoles() // full admins support every queue
+	}
+	for _, role := range roles {
+		var list []ticketRow
+		for _, t := range a.store.TicketsForRole(role.ID) {
+			list = append(list, a.decorateTicket(t))
+		}
+		if len(list) > 0 {
+			queues[role.Name] = list
+		}
+	}
+	a.render(w, r, "tickets", "Tickets", ticketsData{
+		Mine: mine, Queues: queues, Roles: a.store.CustomRoles(),
+	})
+}
+
+func (a *App) handleTicketNewForm(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "ticket_new", "Open a ticket", a.store.CustomRoles())
+}
+
+func (a *App) handleTicketCreate(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	roleID := r.FormValue("role_id")
+	role, err := a.store.CustomRoleByID(roleID)
+	if err != nil {
+		a.fail(w, r, "Pick a valid support area.", "/tickets/new")
+		return
+	}
+	t, err := a.store.CreateTicket(roleID, me.ID, r.FormValue("subject"), r.FormValue("body"))
+	if err != nil {
+		a.fail(w, r, err.Error(), "/tickets/new")
+		return
+	}
+	a.audit.Write(me.Email, "ticket.create", t.ID, role.Name, a.clientIP(r))
+	a.notifyTicketCreated(t, role, me)
+	a.ok(w, r, "Ticket opened.", "/tickets/"+t.ID)
+}
+
+type ticketDetailData struct {
+	Ticket    Ticket
+	RoleName  string
+	RoleColor string
+	Messages  []TicketMessage
+	CanReply  bool
+}
+
+func (a *App) handleTicketDetail(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	t, err := a.store.TicketByID(r.PathValue("id"))
+	if err != nil || !a.canAccessTicket(me, t) {
+		a.notFound(w, r)
+		return
+	}
+	role, _ := a.store.CustomRoleByID(t.RoleID)
+	a.render(w, r, "ticket_detail", t.Subject, ticketDetailData{
+		Ticket: t, RoleName: role.Name, RoleColor: role.Color,
+		Messages: a.store.MessagesForTicket(t.ID), CanReply: true,
+	})
+}
+
+func (a *App) handleTicketReply(w http.ResponseWriter, r *http.Request) {
+	me := a.current(r)
+	t, err := a.store.TicketByID(r.PathValue("id"))
+	if err != nil || !a.canAccessTicket(me, t) {
+		a.notFound(w, r)
+		return
+	}
+	role, _ := a.store.CustomRoleByID(t.RoleID)
+	newStatus := TicketStatus(r.FormValue("status"))
+	if !validTicketStatus(newStatus) {
+		newStatus = t.Status
+	}
+	body := strings.TrimSpace(r.FormValue("body"))
+	if body == "" && newStatus == t.Status {
+		a.fail(w, r, "Add a message or change the status.", "/tickets/"+t.ID)
+		return
+	}
+	statusChanged := newStatus != t.Status
+	if err := a.store.AddTicketMessage(t.ID, me.ID, me.Display(), body, newStatus); err != nil {
+		a.fail(w, r, "Could not save your reply.", "/tickets/"+t.ID)
+		return
+	}
+	a.audit.Write(me.Email, "ticket.reply", t.ID, string(newStatus), a.clientIP(r))
+	t.Status = newStatus
+	msgForEmail := body
+	if msgForEmail == "" {
+		msgForEmail = fmt.Sprintf("(status changed to %s, no message)", newStatus.Label())
+	}
+	a.notifyTicketUpdate(t, role, me, msgForEmail, statusChanged)
+	a.ok(w, r, "Reply sent.", "/tickets/"+t.ID)
 }

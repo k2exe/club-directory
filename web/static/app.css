@@ -342,3 +342,69 @@ button.searchbar-btn, .searchbar button { background: var(--ink); color: var(--c
 
 .approve { font-weight: 600; color: #3f7a4f; margin-left: .5rem; }
 .approve:hover { border-bottom-color: #3f7a4f; }
+
+/* ---------- custom role colors ----------
+   One CSS variable per preset; .swatch (a clickable color square in the role
+   editor) and .tag-role (a colored label on a member/roster/ticket) each
+   read it differently, so the palette lives in exactly one place. */
+
+.swatch-blue   { --role-color: #2f6690; }
+.swatch-purple { --role-color: #7d5ba6; }
+.swatch-teal   { --role-color: #2f8f8f; }
+.swatch-orange { --role-color: #c8752b; }
+.swatch-pink   { --role-color: #b5476b; }
+.swatch-indigo { --role-color: #4a5a9e; }
+.swatch-brown  { --role-color: #7a5c3e; }
+.swatch-slate  { --role-color: #55606b; }
+
+.swatch-picker { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0 .8rem; align-items: center; }
+.swatch {
+  display: inline-block; width: 1.7rem; height: 1.7rem; border-radius: 50%;
+  background: var(--role-color); border: 1px solid rgba(18,36,47,.25); cursor: pointer;
+}
+.swatch-radio:checked + .swatch { outline: 2px solid var(--ink); outline-offset: 2px; }
+.swatch-radio:focus-visible + .swatch { outline: 2px solid var(--signal); outline-offset: 2px; }
+.swatch-custom { display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--ink-2); }
+.swatch-custom input[type="color"] { width: 2.4rem; height: 1.9rem; padding: .15rem; cursor: pointer; }
+
+.tag-role {
+  display: inline-block; font-family: var(--mono); font-size: .6rem;
+  text-transform: uppercase; letter-spacing: .1em; border: 1px solid var(--role-color, var(--ink-3));
+  color: var(--role-color, var(--ink-2)); padding: 0 .3rem; margin: 0 .25rem .25rem 0; vertical-align: middle;
+}
+.qsl .tag-role { position: static; }
+
+/* ---------- nets ---------- */
+
+.netlist { list-style: none; margin: 1.4rem 0; padding: 0; display: grid; gap: .8rem; }
+.netcard {
+  background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--ink);
+  padding: .8rem 1rem; display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: baseline;
+}
+.netcard-when { font-family: var(--mono); font-weight: 700; min-width: 11rem; }
+.netcard-name { font-weight: 600; }
+.netcard-meta { color: var(--ink-2); font-size: .87rem; }
+
+/* ---------- tickets ---------- */
+
+.ticket-status {
+  display: inline-block; font-size: .68rem; text-transform: uppercase; letter-spacing: .1em;
+  border: 1px solid var(--ink-3); color: var(--ink-2); padding: .1rem .45rem; border-radius: var(--radius);
+}
+.ticket-status-open { border-color: #3f7a4f; color: #3f7a4f; }
+.ticket-status-waiting_user { border-color: var(--signal); color: var(--signal); }
+.ticket-status-waiting_support { border-color: #b9852b; color: #b9852b; }
+.ticket-status-resolved { border-color: var(--ink-3); color: var(--ink-3); }
+
+.ticketrow {
+  display: flex; justify-content: space-between; gap: 1rem; padding: .7rem 0;
+  border-bottom: 1px solid var(--rule); flex-wrap: wrap; align-items: center;
+}
+.thread { display: flex; flex-direction: column; gap: .9rem; margin: 1.2rem 0; }
+.msg { background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--ink-3); padding: .7rem .9rem; }
+.msg-self { border-left-color: var(--signal); }
+.msg-head { display: flex; justify-content: space-between; font-size: .78rem; color: var(--ink-2); margin-bottom: .3rem; }
+.msg-body { white-space: pre-wrap; margin: 0; }
+
+.weekday-grid { display: flex; flex-wrap: wrap; gap: .8rem; margin: .3rem 0 .8rem; }
+.weekday-grid label { font-weight: 400; }

@@ -1,0 +1,75 @@
+{{define "content"}}
+{{$n := .Data.Net}}
+<p class="crumb"><a href="/nets">← Nets</a></p>
+<div class="narrow">
+<p class="eyebrow">Schedule</p>
+<h1 class="page-title">{{if $n}}Edit net{{else}}Schedule a net{{end}}</h1>
+
+<form method="post" action="{{if $n}}/nets/{{$n.ID}}{{else}}/nets{{end}}" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="name">Name</label>
+  <input id="name" name="name" value="{{if $n}}{{$n.Name}}{{end}}" required placeholder="Weekly check-in net">
+
+  <div class="row">
+    <div><label for="frequency">Frequency</label>
+      <input id="frequency" name="frequency" value="{{if $n}}{{$n.Frequency}}{{end}}" placeholder="146.850 MHz"></div>
+    <div><label for="mode">Mode <span class="quiet">(optional)</span></label>
+      <input id="mode" name="mode" value="{{if $n}}{{$n.Mode}}{{end}}" placeholder="FM, USB, ..."></div>
+  </div>
+
+  <label for="repeater_id">Repeater <span class="quiet">(optional)</span></label>
+  <select id="repeater_id" name="repeater_id">
+    <option value="">None / simplex</option>
+    {{range .Data.Repeaters}}
+    <option value="{{.ID}}" {{if and $n (eq $n.RepeaterID .ID)}}selected{{end}}>{{.Name}}{{if .Frequency}} ({{.Frequency}}){{end}}</option>
+    {{end}}
+  </select>
+
+  <label for="starts_at">First / reference date &amp; time (UTC)</label>
+  <input id="starts_at" name="starts_at" type="datetime-local" required
+         value="{{if $n}}{{dtlocal $n.StartsAt}}{{end}}">
+
+  <label for="recur_kind">Repeats</label>
+  <select id="recur_kind" name="recur_kind">
+    {{range recurKinds}}
+    <option value="{{.}}" {{if and $n (eq (printf "%s" .) (printf "%s" $n.Recur))}}selected{{end}}>{{.Label}}</option>
+    {{end}}
+  </select>
+
+  <h3 class="sub">If weekly: which day(s)?</h3>
+  <p class="quiet">Ignored unless "Repeats" above is set to weekly.</p>
+  <label class="check"><input type="radio" name="weekly_preset" value="custom" checked>
+    <span>Use the specific days ticked below</span></label>
+  <label class="check"><input type="radio" name="weekly_preset" value="weekdays">
+    <span>Every weekday (Mon–Fri)</span></label>
+  <label class="check"><input type="radio" name="weekly_preset" value="weekends">
+    <span>Weekends (Sat–Sun)</span></label>
+  <div class="weekday-grid">
+    {{range weekdays}}
+    <label class="check">
+      <input type="checkbox" name="weekday_{{weekday .}}" {{if and $n (bitSet $n.WeekdaysMask (weekday .))}}checked{{end}}>
+      <span>{{weekdayName .}}</span>
+    </label>
+    {{end}}
+  </div>
+
+  <h3 class="sub">If monthly on the Nth weekday</h3>
+  <p class="quiet">E.g. "the 3rd Wednesday of every month." Ignored otherwise.</p>
+  <div class="row">
+    <div><label for="nth_week">Week</label>
+      <select id="nth_week" name="nth_week">
+        {{range nths}}<option value="{{.}}" {{if and $n (eq $n.NthWeek .)}}selected{{end}}>{{nthLabel .}}</option>{{end}}
+      </select></div>
+    <div><label for="nth_weekday">Weekday</label>
+      <select id="nth_weekday" name="nth_weekday">
+        {{range weekdays}}<option value="{{weekday .}}" {{if and $n (eq (weekday $n.NthWeekday) (weekday .))}}selected{{end}}>{{weekdayName .}}</option>{{end}}
+      </select></div>
+  </div>
+
+  <label for="ends_at">Stop repeating after <span class="quiet">(optional)</span></label>
+  <input id="ends_at" name="ends_at" type="date" value="{{if $n}}{{dateonly $n.EndsAt}}{{end}}">
+
+  <button class="btn" type="submit">{{if $n}}Save net{{else}}Schedule net{{end}}</button>
+</form>
+</div>
+{{end}}

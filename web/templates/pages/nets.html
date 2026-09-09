@@ -1,0 +1,30 @@
+{{define "content"}}
+<div class="headrow">
+  <div>
+    <p class="eyebrow">Schedule</p>
+    <h1 class="page-title">Nets</h1>
+  </div>
+  {{if .Data.CanManage}}<a class="btn" href="/nets/new">Schedule a net</a>{{end}}
+</div>
+
+<ul class="netlist">
+{{range .Data.Rows}}
+  <li class="netcard">
+    <div class="netcard-when">{{datetime .Next}}</div>
+    <div>
+      <div class="netcard-name">{{.Name}}</div>
+      <div class="netcard-meta">
+        {{if .Frequency}}{{.Frequency}}{{end}}{{if .RepeaterName}} via {{.RepeaterName}}{{end}}{{if .Mode}} · {{.Mode}}{{end}}
+        · {{.RecurDescription}}
+      </div>
+    </div>
+    {{if $.Data.CanManage}}<a href="/nets/{{.ID}}/edit">Edit</a>{{end}}
+  </li>
+{{else}}
+  <li class="quiet">No nets scheduled yet.</li>
+{{end}}
+</ul>
+<p class="quiet">Want a reminder email before each net? Set it up on
+  <a href="/account">your account</a> page.</p>
+{{if .Data.CanManage}}<p class="quiet"><a href="/admin/repeaters">Manage repeaters</a></p>{{end}}
+{{end}}

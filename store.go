@@ -124,6 +124,11 @@ type Member struct {
 	JoinedAt    time.Time  `json:"joined_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+
+	// NetRemind: opt-in reminder email before a scheduled net. LeadMinutes is
+	// meaningless while OptIn is false.
+	NetRemindOptIn       bool `json:"net_remind_opt_in"`
+	NetRemindLeadMinutes int  `json:"net_remind_lead_minutes"`
 }
 
 func (m *Member) IsAdmin() bool { return m.Role == RoleAdmin }
@@ -212,10 +217,84 @@ CREATE TABLE IF NOT EXISTS members (
 	totp_last_step     INTEGER NOT NULL DEFAULT 0,
 	backup_codes       TEXT NOT NULL DEFAULT '[]',
 	session_epoch      INTEGER NOT NULL DEFAULT 0,
+
 	admin_notes        TEXT NOT NULL DEFAULT '',
 	joined_at          TEXT NOT NULL,
 	updated_at         TEXT NOT NULL,
-	last_login_at      TEXT
+	last_login_at      TEXT,
+	net_remind_opt_in     INTEGER NOT NULL DEFAULT 0,
+	net_remind_lead_mins  INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------- NetRemind ----------
+
+CREATE TABLE IF NOT EXISTS repeaters (
+	id         TEXT PRIMARY KEY,
+	name       TEXT NOT NULL,
+	frequency  TEXT NOT NULL DEFAULT '',
+	notes      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS nets (
+	id                   TEXT PRIMARY KEY,
+	name                 TEXT NOT NULL,
+	frequency            TEXT NOT NULL DEFAULT '',
+	repeater_id          TEXT REFERENCES repeaters(id) ON DELETE SET NULL,
+	mode                 TEXT NOT NULL DEFAULT '',
+	starts_at            TEXT NOT NULL,
+	recur_kind           TEXT NOT NULL,
+	recur_weekdays_mask  INTEGER NOT NULL DEFAULT 0,
+	recur_nth_week       INTEGER NOT NULL DEFAULT 0,
+	recur_nth_weekday    INTEGER NOT NULL DEFAULT 0,
+	ends_at              TEXT,
+	created_by           TEXT NOT NULL DEFAULT '',
+	created_at           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reminder_log (
+	net_id        TEXT NOT NULL,
+	occurrence_at TEXT NOT NULL,
+	member_id     TEXT NOT NULL,
+	sent_at       TEXT NOT NULL,
+	PRIMARY KEY (net_id, occurrence_at, member_id)
+);
+
+-- ---------- custom roles ----------
+
+CREATE TABLE IF NOT EXISTS custom_roles (
+	id                TEXT PRIMARY KEY,
+	name              TEXT NOT NULL UNIQUE,
+	color             TEXT NOT NULL,
+	is_lifecycle      INTEGER NOT NULL DEFAULT 0,
+	grants_net_admin  INTEGER NOT NULL DEFAULT 0,
+	created_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS member_roles (
+	member_id  TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+	role_id    TEXT NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
+	PRIMARY KEY (member_id, role_id)
+);
+
+-- ---------- tickets ----------
+
+CREATE TABLE IF NOT EXISTS tickets (
+	id          TEXT PRIMARY KEY,
+	role_id     TEXT NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
+	member_id   TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+	subject     TEXT NOT NULL,
+	status      TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticket_messages (
+	id          TEXT PRIMARY KEY,
+	ticket_id   TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+	author_id   TEXT NOT NULL DEFAULT '',
+	author_name TEXT NOT NULL DEFAULT '',
+	body        TEXT NOT NULL,
+	created_at  TEXT NOT NULL
 );
 `
 
@@ -331,6 +410,7 @@ func scanMember(row scanner) (*Member, error) {
 	var totpEnabledAt, lastLoginAt sql.NullString
 	var backupCodes string
 	var shareEmail, sharePhone, shareAddress, sharePhoto, needsReview int
+	var netRemindOptIn int
 
 	err := row.Scan(
 		&m.ID, &m.Email, &m.Name, &m.CallSign, &m.Role,
@@ -341,10 +421,12 @@ func scanMember(row scanner) (*Member, error) {
 		&shareEmail, &sharePhone, &shareAddress, &sharePhoto, &needsReview,
 		&m.TOTPSecret, &totpEnabledAt, &m.TOTPLastStep, &backupCodes, &m.SessionEpoch,
 		&m.AdminNotes, &joinedAt, &updatedAt, &lastLoginAt,
+		&netRemindOptIn, &m.NetRemindLeadMinutes,
 	)
 	if err != nil {
 		return nil, err
 	}
+	m.NetRemindOptIn = netRemindOptIn != 0
 	m.StatusChangedAt = parseTime(statusChangedAt)
 	m.JoinedAt = parseTime(joinedAt)
 	m.UpdatedAt = parseTime(updatedAt)
@@ -376,6 +458,7 @@ var memberCols = []string{
 	"share_email", "share_phone", "share_address", "share_photo", "needs_review",
 	"totp_secret", "totp_enabled_at", "totp_last_step", "backup_codes", "session_epoch",
 	"admin_notes", "joined_at", "updated_at", "last_login_at",
+	"net_remind_opt_in", "net_remind_lead_mins",
 }
 
 var memberColumns = strings.Join(memberCols, ", ")
@@ -394,6 +477,7 @@ func (m *Member) values() []any {
 		boolToInt(m.NeedsReview),
 		m.TOTPSecret, nullableTime(m.TOTPEnabled), m.TOTPLastStep, string(codes), m.SessionEpoch,
 		m.AdminNotes, formatTime(m.JoinedAt), formatTime(m.UpdatedAt), nullableTime(m.LastLoginAt),
+		boolToInt(m.NetRemindOptIn), m.NetRemindLeadMinutes,
 	}
 }
 

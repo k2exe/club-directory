@@ -91,6 +91,7 @@ func main() {
 	if err := app.bootstrap(); err != nil {
 		log.Fatalf("bootstrap: %v", err)
 	}
+	go app.runReminderScheduler()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -177,6 +178,34 @@ func (a *App) loadTemplates() error {
 		"lower":    strings.ToLower,
 		"statuses": func() []Status { return allStatuses },
 		"eq3":      func(a, b string) bool { return a == b },
+
+		"dtlocal": func(t time.Time) string {
+			if t.IsZero() {
+				return ""
+			}
+			return t.Format("2006-01-02T15:04")
+		},
+		"dateonly": func(t *time.Time) string {
+			if t == nil {
+				return ""
+			}
+			return t.Format("2006-01-02")
+		},
+		"weekday":        func(d time.Weekday) int { return int(d) },
+		"weekdayName":    func(d time.Weekday) string { return d.String() },
+		"weekdays":       func() []time.Weekday { return allWeekdays },
+		"bitSet":         func(mask, bit int) bool { return mask&(1<<uint(bit)) != 0 },
+		"recurKinds":     func() []RecurKind { return allRecurKinds },
+		"ticketStatuses": func() []TicketStatus { return allTicketStatuses },
+		"colorPresets":   func() []ColorPreset { return colorPresets },
+		"nths":           func() []int { return []int{1, 2, 3, 4, 5} },
+		"nthLabel": func(n int) string {
+			if n == 5 {
+				return "last"
+			}
+			return ordinal(n)
+		},
+		"hasRole": func(assigned map[string]bool, id string) bool { return assigned[id] },
 	}
 	pages, err := fs.Glob(webFS, "web/templates/pages/*.html")
 	if err != nil {
@@ -212,6 +241,7 @@ func (a *App) routes() http.Handler {
 	static, _ := fs.Sub(webFS, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/",
 		cacheControl(http.FileServer(http.FS(static)))))
+	mux.HandleFunc("GET /roles.css", a.handleRolesCSS)
 
 	// Public / directory
 	mux.HandleFunc("GET /{$}", a.handleDirectory)
@@ -239,6 +269,24 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /account/security/disable", a.requireMember(a.handleMFADisable))
 	mux.HandleFunc("POST /account/security/codes", a.requireMember(a.handleNewBackupCodes))
 	mux.HandleFunc("POST /account/sessions/revoke", a.requireMember(a.handleRevokeSessions))
+	mux.HandleFunc("POST /account/netremind", a.requireMember(a.handleNetRemindSave))
+
+	// NetRemind: scheduling is a capability (full admin, or a role that
+	// grants it), viewing is limited to members who can already see the roster.
+	mux.HandleFunc("GET /nets", a.requireRosterSight(a.handleNetsList))
+	mux.HandleFunc("GET /nets/new", a.requireNetAdmin(a.handleNetNewForm))
+	mux.HandleFunc("POST /nets", a.requireNetAdmin(a.handleNetCreate))
+	mux.HandleFunc("GET /nets/{id}/edit", a.requireNetAdmin(a.handleNetEditForm))
+	mux.HandleFunc("POST /nets/{id}", a.requireNetAdmin(a.handleNetSave))
+	mux.HandleFunc("POST /nets/{id}/delete", a.requireNetAdmin(a.handleNetDelete))
+
+	// Tickets: any signed-in member (even pending/former) may open and
+	// track their own; per-ticket access is checked inside the handler.
+	mux.HandleFunc("GET /tickets", a.requireMember(a.handleTicketsList))
+	mux.HandleFunc("GET /tickets/new", a.requireMember(a.handleTicketNewForm))
+	mux.HandleFunc("POST /tickets", a.requireMember(a.handleTicketCreate))
+	mux.HandleFunc("GET /tickets/{id}", a.requireMember(a.handleTicketDetail))
+	mux.HandleFunc("POST /tickets/{id}/reply", a.requireMember(a.handleTicketReply))
 
 	// Admin
 	mux.HandleFunc("GET /admin", a.requireAdmin(a.handleAdminRoster))
@@ -253,6 +301,17 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /admin/settings", a.requireAdmin(a.handleSettingsSave))
 	mux.HandleFunc("GET /admin/log", a.requireAdmin(a.handleAuditView))
 	mux.HandleFunc("GET /admin/export.csv", a.requireAdmin(a.handleExport))
+	mux.HandleFunc("POST /admin/member/{id}/roles", a.requireAdmin(a.handleAdminRoleAssign))
+
+	mux.HandleFunc("GET /admin/roles", a.requireAdmin(a.handleAdminRoles))
+	mux.HandleFunc("POST /admin/roles", a.requireAdmin(a.handleAdminRoleCreate))
+	mux.HandleFunc("GET /admin/roles/{id}", a.requireAdmin(a.handleAdminRoleEditForm))
+	mux.HandleFunc("POST /admin/roles/{id}", a.requireAdmin(a.handleAdminRoleSave))
+	mux.HandleFunc("POST /admin/roles/{id}/delete", a.requireAdmin(a.handleAdminRoleDelete))
+
+	mux.HandleFunc("GET /admin/repeaters", a.requireAdmin(a.handleAdminRepeaters))
+	mux.HandleFunc("POST /admin/repeaters", a.requireAdmin(a.handleAdminRepeaterCreate))
+	mux.HandleFunc("POST /admin/repeaters/{id}/delete", a.requireAdmin(a.handleAdminRepeaterDelete))
 
 	return securityHeaders(mux)
 }

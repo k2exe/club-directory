@@ -1,0 +1,23 @@
+{{define "content"}}
+<p class="crumb"><a href="/tickets">← Tickets</a></p>
+<div class="narrow">
+<p class="eyebrow">Support</p>
+<h1 class="page-title">Open a ticket</h1>
+{{if .Data}}
+<form method="post" action="/tickets" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="role_id">Area</label>
+  <select id="role_id" name="role_id" required>
+    {{range .Data}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+  </select>
+  <label for="subject">Subject</label>
+  <input id="subject" name="subject" required placeholder="Briefly, what's wrong?">
+  <label for="body">Details</label>
+  <textarea id="body" name="body" rows="6" required></textarea>
+  <button class="btn" type="submit">Open ticket</button>
+</form>
+{{else}}
+<p class="notice">There are no support areas set up yet — ask an admin to create a custom role first.</p>
+{{end}}
+</div>
+{{end}}

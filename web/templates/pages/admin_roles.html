@@ -1,0 +1,54 @@
+{{define "content"}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow">Admin</p>
+    <h1 class="page-title">Custom roles</h1>
+    <p class="lede">Tags like "Web Admin" or "Repeater Admin". Each one is also a support
+      ticket queue for its holders, and can optionally grant net scheduling or roster
+      lifecycle alerts.</p>
+  </div>
+</div>
+
+<div class="cols">
+  <section class="panel">
+    <h2 class="panel-title">Existing roles</h2>
+    {{range .Data.Roles}}
+    <div class="ticketrow">
+      <div>
+        <span class="tag-role role-{{.ID}}">{{.Name}}</span>
+        {{if .IsLifecycle}}<span class="quiet small">· lifecycle alerts</span>{{end}}
+        {{if .GrantsNetAdmin}}<span class="quiet small">· can schedule nets</span>{{end}}
+      </div>
+      <div>
+        <a href="/admin/roles/{{.ID}}">Edit</a>
+        <form method="post" action="/admin/roles/{{.ID}}/delete" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="linkish danger" type="submit">Delete</button>
+        </form>
+      </div>
+    </div>
+    {{else}}
+    <p class="quiet">No custom roles yet.</p>
+    {{end}}
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">{{if .Data.Editing}}Edit role{{else}}Create a role{{end}}</h2>
+    <form method="post" action="{{if .Data.Editing}}/admin/roles/{{.Data.Editing.ID}}{{else}}/admin/roles{{end}}" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label for="rname">Name</label>
+      <input id="rname" name="name" value="{{if .Data.Editing}}{{.Data.Editing.Name}}{{end}}" required placeholder="Web Admin">
+
+      {{if .Data.Editing}}{{template "colorpicker" .Data.Editing.Color}}{{else}}{{template "colorpicker" ""}}{{end}}
+
+      <label class="check"><input type="checkbox" name="grants_net_admin" {{if and .Data.Editing .Data.Editing.GrantsNetAdmin}}checked{{end}}>
+        <span>Members with this role can schedule and manage nets</span></label>
+      <label class="check"><input type="checkbox" name="is_lifecycle" {{if and .Data.Editing .Data.Editing.IsLifecycle}}checked{{end}}>
+        <span>Lifecycle role — holders are emailed when a member joins or changes status</span></label>
+      <button class="btn" type="submit">{{if .Data.Editing}}Save role{{else}}Create role{{end}}</button>
+    </form>
+    {{if .Data.Editing}}<p class="quiet"><a href="/admin/roles">Cancel, create a new role instead</a></p>{{end}}
+  </section>
+</div>
+{{end}}
