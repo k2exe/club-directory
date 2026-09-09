@@ -280,7 +280,7 @@ CREATE TABLE IF NOT EXISTS member_roles (
 
 CREATE TABLE IF NOT EXISTS tickets (
 	id          TEXT PRIMARY KEY,
-	role_id     TEXT NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
+	role_id     TEXT NOT NULL REFERENCES custom_roles(id),
 	member_id   TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
 	subject     TEXT NOT NULL,
 	status      TEXT NOT NULL,
@@ -322,12 +322,63 @@ func OpenStore(dir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrating schema: %w", err)
 	}
+	if err := migrateColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating columns: %w", err)
+	}
 	s := &Store{db: db, dir: dir}
 	if err := s.ensureMeta(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// columnMigrations lists columns added to existing tables after their first
+// release. CREATE TABLE IF NOT EXISTS above is a no-op against a database
+// that already has the table, so a brand new column needs its own ALTER
+// TABLE here or every store opened against pre-existing data starts
+// returning "no such column" the moment a query touches it.
+var columnMigrations = []struct{ table, column, ddl string }{
+	{"members", "net_remind_opt_in", "INTEGER NOT NULL DEFAULT 0"},
+	{"members", "net_remind_lead_mins", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+func migrateColumns(db *sql.DB) error {
+	for _, m := range columnMigrations {
+		has, err := hasColumn(db, m.table, m.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.table, m.column, m.ddl)); err != nil {
+			return fmt.Errorf("adding %s.%s: %w", m.table, m.column, err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -662,6 +713,18 @@ func accessOf(m *Member) Access {
 	}
 	return AccessNone
 }
+
+// eligibleForRole is the one place that decides whether a custom-role
+// assignment (net-admin capability, ticket-queue support, lifecycle alerts)
+// is currently "live." Holding a role is not enough on its own: a member
+// who has been suspended, banned, marked silent key, or left the club still
+// has the member_roles row (nothing revokes it on a status change), but
+// none of that role's capabilities should still work for them. Every HTTP
+// check and every notification recipient list calls this exact function so
+// the two can never drift apart, per the review that flagged the original
+// gap. A pending or former member keeps AccessSelf for their own record on
+// purpose (see accessOf) — that is deliberately NOT enough here.
+func eligibleForRole(m *Member) bool { return accessOf(m) >= AccessMember }
 
 func audienceFor(viewer *Member) Audience {
 	switch accessOf(viewer) {

@@ -22,6 +22,12 @@ type Mailer struct {
 	Insecure bool
 	Outbox   string
 	Echo     bool // also print to the log, for first-run and troubleshooting
+
+	// DialTimeout/SMTPDeadline default to dialTimeout/smtpDeadline when
+	// zero; tests set them short so a deliberately unreachable relay
+	// doesn't cost real wall-clock seconds.
+	DialTimeout  time.Duration
+	SMTPDeadline time.Duration
 }
 
 func (m *Mailer) Configured() bool { return m.Host != "" }
@@ -51,14 +57,29 @@ func indent(s string) string {
 
 func (m *Mailer) compose(to, subject, body string) []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", m.From)
-	fmt.Fprintf(&b, "To: %s\r\n", to)
-	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&b, "From: %s\r\n", sanitizeHeaderValue(m.From))
+	fmt.Fprintf(&b, "To: %s\r\n", sanitizeHeaderValue(to))
+	fmt.Fprintf(&b, "Subject: %s\r\n", sanitizeHeaderValue(subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: text/plain; charset=utf-8\r\n\r\n")
 	b.WriteString(strings.ReplaceAll(body, "\n", "\r\n"))
 	return []byte(b.String())
+}
+
+// sanitizeHeaderValue strips CR/LF (and other control characters) from a
+// value bound for a raw RFC 5322 header line. Every header value here
+// eventually comes from something a member typed — a ticket subject, a
+// display name — and this is the one place all of them pass through before
+// hitting the wire, so a "Subject: hi\r\nX-Injected: yes" can't inject
+// extra headers or forge a From/To.
+func sanitizeHeaderValue(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || (r < 0x20 && r != '\t') {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (m *Mailer) spool(to, subject string, msg []byte) error {
@@ -69,10 +90,34 @@ func (m *Mailer) spool(to, subject string, msg []byte) error {
 	return os.WriteFile(filepath.Join(m.Outbox, name), msg, 0o600)
 }
 
+// dialTimeout bounds connecting to the relay; smtpDeadline bounds the whole
+// conversation after that (handshake through data transfer) — smtp.Dial on
+// its own has neither, so a relay that accepts the TCP connection and then
+// never speaks (or a route that black-holes instead of refusing) hangs a
+// reminder or ticket-notification send indefinitely.
+const dialTimeout = 10 * time.Second
+const smtpDeadline = 30 * time.Second
+
 func (m *Mailer) deliver(to string, msg []byte) error {
+	dt, sd := m.DialTimeout, m.SMTPDeadline
+	if dt == 0 {
+		dt = dialTimeout
+	}
+	if sd == 0 {
+		sd = smtpDeadline
+	}
 	addr := net.JoinHostPort(m.Host, fmt.Sprint(m.Port))
-	c, err := smtp.Dial(addr)
+	conn, err := net.DialTimeout("tcp", addr, dt)
 	if err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(time.Now().Add(sd)); err != nil {
+		conn.Close()
+		return err
+	}
+	c, err := smtp.NewClient(conn, m.Host)
+	if err != nil {
+		conn.Close()
 		return err
 	}
 	defer c.Close()

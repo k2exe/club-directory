@@ -131,7 +131,20 @@ func (s *Store) SaveCustomRole(r CustomRole) (CustomRole, error) {
 	return r, err
 }
 
+var ErrRoleHasTickets = errors.New("role still has tickets")
+
+// DeleteCustomRole refuses to delete a role that still has tickets — the
+// tickets table has no ON DELETE CASCADE on role_id specifically so this
+// can never happen by accident, but check first for a clear error rather
+// than surfacing the raw FOREIGN KEY constraint failure.
 func (s *Store) DeleteCustomRole(id string) error {
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM tickets WHERE role_id = ?", id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrRoleHasTickets
+	}
 	res, err := s.db.Exec("DELETE FROM custom_roles WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -164,6 +177,12 @@ func (s *Store) RolesFor(memberID string) []CustomRole {
 // MembersWithRole returns everyone holding a given custom role — the
 // supporters for that role's ticket queue, and (if the role is lifecycle)
 // the recipients of roster-change alerts.
+// MembersWithRole returns the currently-eligible supporters for a role's
+// ticket queue — a member whose account has lapsed (banned, suspended,
+// silent key, still-pending) keeps the member_roles row but drops out of
+// this list, via the same eligibleForRole check every HTTP access decision
+// uses. That is deliberate: nothing revokes a role assignment on a status
+// change, so this is the one place that has to notice it went stale.
 func (s *Store) MembersWithRole(roleID string) []*Member {
 	rows, err := s.db.Query(`SELECT member_id FROM member_roles WHERE role_id = ?`, roleID)
 	if err != nil {
@@ -177,9 +196,16 @@ func (s *Store) MembersWithRole(roleID string) []*Member {
 			ids = append(ids, id)
 		}
 	}
+	return s.eligibleMembersByID(ids)
+}
+
+// eligibleMembersByID resolves IDs to *Member, dropping any that no longer
+// exist or are no longer eligibleForRole. Shared by every place that turns
+// a role assignment into a list of people to notify.
+func (s *Store) eligibleMembersByID(ids []string) []*Member {
 	out := []*Member{}
 	for _, id := range ids {
-		if m, err := s.ByID(id); err == nil {
+		if m, err := s.ByID(id); err == nil && eligibleForRole(m) {
 			out = append(out, m)
 		}
 	}
@@ -208,7 +234,17 @@ func (s *Store) SetMemberRoles(memberID string, roleIDs []string) error {
 
 // GrantsNetAdmin reports whether a member holds any role that grants net
 // scheduling. Full Admins already bypass this check at the call site.
+// GrantsNetAdmin reports whether memberID currently gets net-scheduling
+// access from a role. "Currently" is load-bearing: nothing revokes a
+// member_roles row when its holder is suspended, banned, or leaves, so this
+// also requires eligibleForRole — the same test every ticket-queue and
+// lifecycle-notification decision uses — rather than just checking the
+// assignment exists.
 func (s *Store) GrantsNetAdmin(memberID string) bool {
+	m, err := s.ByID(memberID)
+	if err != nil || !eligibleForRole(m) {
+		return false
+	}
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM member_roles mr JOIN custom_roles cr ON cr.id = mr.role_id
 		WHERE mr.member_id = ? AND cr.grants_net_admin = 1`, memberID).Scan(&n)
@@ -230,13 +266,7 @@ func (s *Store) lifecycleRecipients() []*Member {
 			ids = append(ids, id)
 		}
 	}
-	out := []*Member{}
-	for _, id := range ids {
-		if m, err := s.ByID(id); err == nil {
-			out = append(out, m)
-		}
-	}
-	return out
+	return s.eligibleMembersByID(ids)
 }
 
 // handleRolesCSS serves one `--role-color` custom property per custom role,

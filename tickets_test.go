@@ -56,6 +56,61 @@ func TestRegressionCreateTicketDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// Regression: a supporter whose account has since gone inactive (banned,
+// suspended, left) keeps the role assignment — nothing revokes it on a
+// status change — but must lose queue visibility and stop being emailed.
+// The submitter's own access to their own ticket is a separate rule and
+// must NOT be affected by their status.
+func TestRegressionInactiveSupporterLosesTicketAccess(t *testing.T) {
+	a := testApp(t)
+	role, submitter, supporter1, _, _ := setupTicketFixture(t, a)
+	ticket, err := a.store.CreateTicket(role.ID, submitter.ID, "Help", "Something broke")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.store.Update(supporter1.ID, func(x *Member) error { x.Status = StatusFormer; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	supporter1, _ = a.store.ByID(supporter1.ID)
+	if a.canAccessTicket(supporter1, ticket) {
+		t.Error("a former supporter should lose ticket-queue access")
+	}
+	if got := a.store.MembersWithRole(role.ID); len(got) != 1 {
+		t.Errorf("MembersWithRole should drop the former supporter, got %d eligible", len(got))
+	}
+
+	if _, err := a.store.Update(submitter.ID, func(x *Member) error { x.Status = StatusFormer; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	submitter, _ = a.store.ByID(submitter.ID)
+	if !a.canAccessTicket(submitter, ticket) {
+		t.Error("a former member must still be able to see their own ticket")
+	}
+}
+
+// A pending or otherwise low-trust account can open tickets, but not an
+// unlimited number of them — each one fans out email to every supporter.
+func TestTicketCreationIsRateLimited(t *testing.T) {
+	a := testApp(t)
+	a.ticketRL = newLimiter(3, time.Hour)
+	role, submitter, _, _, _ := setupTicketFixture(t, a)
+
+	for i := 0; i < 3; i++ {
+		form := url.Values{"role_id": {role.ID}, "subject": {"Issue"}, "body": {"details"}}
+		if code := a.post(t, "/tickets", form, submitter).Code; code != http.StatusSeeOther {
+			t.Fatalf("ticket %d: got %d, want redirect", i, code)
+		}
+	}
+	form := url.Values{"role_id": {role.ID}, "subject": {"One too many"}, "body": {"details"}}
+	a.post(t, "/tickets", form, submitter)
+	for _, tk := range a.store.TicketsForMember(submitter.ID) {
+		if tk.Subject == "One too many" {
+			t.Error("the 4th ticket within the rate-limit window should have been refused, not created")
+		}
+	}
+}
+
 func TestTicketAccessControl(t *testing.T) {
 	a := testApp(t)
 	role, submitter, supporter1, _, stranger := setupTicketFixture(t, a)

@@ -241,6 +241,19 @@ func (s *Store) SaveNet(n Net) (Net, error) {
 	if n.StartsAt.IsZero() {
 		return Net{}, fmt.Errorf("a net needs a start date and time")
 	}
+	// Defense in depth: netFromForm already enforces these for real HTTP
+	// requests, but SaveNet is the actual boundary a caller (test, future
+	// API) can't get around, and each of these has caused a net to save
+	// successfully and then silently never produce an occurrence.
+	if !validRecurKind(n.Recur) {
+		return Net{}, fmt.Errorf("%q is not a valid recurrence", n.Recur)
+	}
+	if n.Recur == RecurMonthlyNth && (n.NthWeek < 1 || n.NthWeek > 5) {
+		return Net{}, fmt.Errorf("nth week must be 1-5 (5 = last), got %d", n.NthWeek)
+	}
+	if n.EndsAt != nil && n.EndsAt.Before(n.StartsAt) {
+		return Net{}, fmt.Errorf("end date cannot be before the first occurrence")
+	}
 	var repeaterID, endsAt any
 	if n.RepeaterID != "" {
 		repeaterID = n.RepeaterID
@@ -435,7 +448,12 @@ func nthWeekdayOfMonth(y int, m time.Month, wd time.Weekday, nth int) (time.Time
 
 // ---------- reminder scheduler ----------
 
-const reminderCheckWindow = time.Minute
+// reminderCheckWindow bounds how stale a reminder is allowed to be before
+// it's given up on rather than sent absurdly late. It is deliberately wider
+// than the scheduler's own 1-minute tick: a blocked tick, a slow SMTP call,
+// or a few minutes of downtime must not permanently lose a reminder that
+// hadn't gone stale yet (see sendNetReminder for the retry side of this).
+const reminderCheckWindow = 15 * time.Minute
 
 // checkReminders looks at every net's next occurrence and every opted-in
 // member's lead time, and sends (and dedups) a reminder for anything due in
@@ -471,14 +489,20 @@ func (a *App) checkReminders(now time.Time) {
 	}
 }
 
+// sendNetReminder checks the reminder isn't already sent, sends it, and only
+// then records it as sent — never the other way around. Recording success
+// before attempting delivery would mean a single SMTP hiccup permanently
+// loses that reminder, since presence in reminder_log is what stops every
+// later tick from retrying it. Checked-then-sent-then-recorded is safe here
+// because checkReminders only ever runs on one goroutine at a time.
 func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
-	sent, err := a.store.markReminderSent(n.ID, occ, m.ID)
+	already, err := a.store.reminderAlreadySent(n.ID, occ, m.ID)
 	if err != nil {
 		log.Printf("reminder dedup check for %s: %v", m.Email, err)
 		return
 	}
-	if !sent {
-		return // already sent for this exact occurrence
+	if already {
+		return
 	}
 	repeater := ""
 	if n.RepeaterID != "" {
@@ -498,7 +522,11 @@ func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
 — NetRemind
 `, n.Name, occ.Format("15:04 MST"), n.Frequency, repeater, mode)
 	if err := a.mailer.Send(m.Email, subject, body); err != nil {
-		log.Printf("net reminder to %s: %v", m.Email, err)
+		log.Printf("net reminder to %s: %v (not recorded as sent — a later tick within the catch-up window will retry)", m.Email, err)
+		return
+	}
+	if err := a.store.markReminderSent(n.ID, occ, m.ID); err != nil {
+		log.Printf("recording reminder sent for %s: %v", m.Email, err)
 	}
 }
 
@@ -513,12 +541,19 @@ func (a *App) runReminderScheduler() {
 
 // markReminderSent records the send in reminder_log and reports whether this
 // call was the one that actually inserted it (false = already sent).
-func (s *Store) markReminderSent(netID string, occurrence time.Time, memberID string) (bool, error) {
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, sent_at)
-		VALUES (?, ?, ?, ?)`, netID, formatTime(occurrence), memberID, formatTime(time.Now()))
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
+func (s *Store) reminderAlreadySent(netID string, occurrence time.Time, memberID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM reminder_log WHERE net_id = ? AND occurrence_at = ? AND member_id = ?`,
+		netID, formatTime(occurrence), memberID).Scan(&n)
 	return n > 0, err
+}
+
+// markReminderSent records a successful send. INSERT OR IGNORE rather than a
+// plain INSERT purely as a belt-and-suspenders against the primary key
+// already existing; the real dedup guarantee is reminderAlreadySent being
+// checked before every send attempt.
+func (s *Store) markReminderSent(netID string, occurrence time.Time, memberID string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, sent_at)
+		VALUES (?, ?, ?, ?)`, netID, formatTime(occurrence), memberID, formatTime(time.Now()))
+	return err
 }

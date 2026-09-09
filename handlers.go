@@ -768,6 +768,10 @@ func (a *App) handleTicketNewForm(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTicketCreate(w http.ResponseWriter, r *http.Request) {
 	me := a.current(r)
+	if !a.ticketRL.allow("mem:" + me.ID) {
+		a.fail(w, r, "Too many tickets opened recently. Wait a while and try again.", "/tickets/new")
+		return
+	}
 	roleID := r.FormValue("role_id")
 	role, err := a.store.CustomRoleByID(roleID)
 	if err != nil {
@@ -811,6 +815,10 @@ func (a *App) handleTicketReply(w http.ResponseWriter, r *http.Request) {
 	t, err := a.store.TicketByID(r.PathValue("id"))
 	if err != nil || !a.canAccessTicket(me, t) {
 		a.notFound(w, r)
+		return
+	}
+	if !a.ticketRL.allow("reply:" + me.ID) {
+		a.fail(w, r, "Too many replies sent recently. Wait a while and try again.", "/tickets/"+t.ID)
 		return
 	}
 	role, _ := a.store.CustomRoleByID(t.RoleID)

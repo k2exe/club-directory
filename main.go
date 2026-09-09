@@ -38,6 +38,7 @@ type App struct {
 	mailer         *Mailer
 	links          *linkStore
 	loginRL        *limiter
+	ticketRL       *limiter
 	audit          *AuditLog
 }
 
@@ -83,6 +84,7 @@ func main() {
 		mailer:         &mail,
 		links:          newLinkStore(),
 		loginRL:        newLimiter(5, 15*time.Minute),
+		ticketRL:       newLimiter(10, time.Hour),
 		audit:          newAuditLog(store.Dir()),
 	}
 	if err := app.loadTemplates(); err != nil {

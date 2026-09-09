@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,43 @@ func TestCustomRoleCRUD(t *testing.T) {
 	}
 	if _, err := a.store.CustomRoleByID(role.ID); err != ErrNotFound {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+}
+
+// Regression: deleting a role used to cascade-delete every ticket (and
+// ticket message) in its queue while telling the admin they were merely
+// "orphaned." It must instead be refused outright while tickets exist.
+func TestRegressionDeleteRoleWithTicketsIsBlocked(t *testing.T) {
+	a := testApp(t)
+	role, err := a.store.SaveCustomRole(CustomRole{Name: "Web Admin", Color: "#2f8f8f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitter := mustCreate(t, a, &Member{Email: "m@example.com", Name: "M", CallSign: "W1M",
+		Role: RoleMember, Status: StatusActive})
+	ticket, err := a.store.CreateTicket(role.ID, submitter.ID, "Help", "Something broke")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.store.DeleteCustomRole(role.ID); !errors.Is(err, ErrRoleHasTickets) {
+		t.Fatalf("DeleteCustomRole with open tickets = %v, want ErrRoleHasTickets", err)
+	}
+	// The ticket and its role must both still exist, untouched.
+	if _, err := a.store.TicketByID(ticket.ID); err != nil {
+		t.Errorf("ticket was deleted despite the blocked role deletion: %v", err)
+	}
+	if _, err := a.store.CustomRoleByID(role.ID); err != nil {
+		t.Errorf("role was deleted despite returning an error: %v", err)
+	}
+
+	if err := a.store.AddTicketMessage(ticket.ID, submitter.ID, submitter.Display(), "", TicketResolved); err != nil {
+		t.Fatal(err)
+	}
+	// Resolved tickets still count as "still has tickets" — deletion stays
+	// blocked until the tickets are actually gone, not merely closed.
+	if err := a.store.DeleteCustomRole(role.ID); !errors.Is(err, ErrRoleHasTickets) {
+		t.Fatalf("DeleteCustomRole with a resolved-but-present ticket = %v, want ErrRoleHasTickets", err)
 	}
 }
 
@@ -106,6 +144,29 @@ func TestLifecycleNotificationTargeting(t *testing.T) {
 	}
 	if len(webAdminMail) != 0 {
 		t.Error("the ticket-only role holder should NOT have been emailed a lifecycle alert")
+	}
+}
+
+// Regression: a lifecycle-role holder who is later banned, suspended, or
+// leaves the club keeps the role assignment but must stop receiving
+// lifecycle mail — nothing in this app revokes member_roles on a status
+// change, so the recipient list itself has to filter for it.
+func TestRegressionLifecycleRecipientsExcludeInactiveHolders(t *testing.T) {
+	a := testApp(t)
+	lifecycle, _ := a.store.SaveCustomRole(CustomRole{Name: "Echolink Admin", Color: "#2f6690", IsLifecycle: true})
+	holder := mustCreate(t, a, &Member{Email: "echolink@example.com", Name: "E", CallSign: "W1ECH",
+		Role: RoleMember, Status: StatusActive})
+	a.store.SetMemberRoles(holder.ID, []string{lifecycle.ID})
+
+	if _, err := a.store.Update(holder.ID, func(x *Member) error { x.Status = StatusBanned; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	subject := mustCreate(t, a, &Member{Email: "newbie@example.com", Name: "New", CallSign: "W1NEW",
+		Role: RoleMember, Status: StatusActive})
+	a.notifyLifecycle("was added to the roster", subject, "")
+
+	if got := readOutboxFor(t, a, "echolink_example.com"); len(got) != 0 {
+		t.Error("a banned lifecycle-role holder should not have been emailed")
 	}
 }
 

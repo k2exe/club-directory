@@ -17,12 +17,13 @@ func testApp(t *testing.T) *App {
 		t.Fatalf("store: %v", err)
 	}
 	a := &App{
-		cfg:     Config{DataDir: dir, BaseURL: "http://test.local"},
-		store:   st,
-		mailer:  &Mailer{Outbox: st.OutboxDir()},
-		links:   newLinkStore(),
-		loginRL: newLimiter(1000, time.Minute),
-		audit:   newAuditLog(dir),
+		cfg:      Config{DataDir: dir, BaseURL: "http://test.local"},
+		store:    st,
+		mailer:   &Mailer{Outbox: st.OutboxDir()},
+		links:    newLinkStore(),
+		loginRL:  newLimiter(1000, time.Minute),
+		ticketRL: newLimiter(1000, time.Minute),
+		audit:    newAuditLog(dir),
 	}
 	if err := a.loadTemplates(); err != nil {
 		t.Fatalf("templates: %v", err)

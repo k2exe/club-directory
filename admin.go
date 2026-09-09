@@ -318,11 +318,15 @@ func (a *App) handleAdminRoleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.store.DeleteCustomRole(id); err != nil {
+		if errors.Is(err, ErrRoleHasTickets) {
+			a.fail(w, r, "This role still has tickets in its queue. Resolve or reassign them before deleting the role.", "/admin/roles")
+			return
+		}
 		a.fail(w, r, "Could not delete that role.", "/admin/roles")
 		return
 	}
 	a.audit.Write(me.Email, "admin.role_delete", id, role.Name, a.clientIP(r))
-	a.ok(w, r, "Role deleted. Any open tickets in that queue are now orphaned — resolve them first next time.", "/admin/roles")
+	a.ok(w, r, "Role deleted.", "/admin/roles")
 }
 
 // ---------- repeaters ----------
@@ -391,11 +395,24 @@ func (a *App) handleNetEditForm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func validRecurKind(k RecurKind) bool {
+	for _, x := range allRecurKinds {
+		if x == k {
+			return true
+		}
+	}
+	return false
+}
+
 func netFromForm(r *http.Request) (Net, error) {
 	loc := time.UTC
 	starts, err := time.ParseInLocation("2006-01-02T15:04", r.FormValue("starts_at"), loc)
 	if err != nil {
 		return Net{}, fmt.Errorf("enter a valid start date and time")
+	}
+	recur := RecurKind(r.FormValue("recur_kind"))
+	if !validRecurKind(recur) {
+		return Net{}, fmt.Errorf("pick a valid recurrence")
 	}
 	n := Net{
 		Name:       strings.TrimSpace(r.FormValue("name")),
@@ -403,7 +420,7 @@ func netFromForm(r *http.Request) (Net, error) {
 		RepeaterID: r.FormValue("repeater_id"),
 		Mode:       strings.TrimSpace(r.FormValue("mode")),
 		StartsAt:   starts,
-		Recur:      RecurKind(r.FormValue("recur_kind")),
+		Recur:      recur,
 	}
 	for _, d := range allWeekdays {
 		if r.FormValue(fmt.Sprintf("weekday_%d", int(d))) != "" {
@@ -417,15 +434,28 @@ func netFromForm(r *http.Request) (Net, error) {
 		n.WeekdaysMask = weekendsMask
 	}
 	if n.Recur == RecurMonthlyNth {
-		fmt.Sscanf(r.FormValue("nth_week"), "%d", &n.NthWeek)
-		var wd int
-		fmt.Sscanf(r.FormValue("nth_weekday"), "%d", &wd)
-		n.NthWeekday = time.Weekday(wd)
+		var week, wd int
+		if _, err := fmt.Sscanf(r.FormValue("nth_week"), "%d", &week); err != nil || week < 1 || week > 5 {
+			return Net{}, fmt.Errorf("pick a week (1st through last) for a monthly-Nth-weekday net")
+		}
+		if _, err := fmt.Sscanf(r.FormValue("nth_weekday"), "%d", &wd); err != nil || wd < 0 || wd > 6 {
+			return Net{}, fmt.Errorf("pick a valid weekday for a monthly-Nth-weekday net")
+		}
+		n.NthWeek, n.NthWeekday = week, time.Weekday(wd)
 	}
 	if end := strings.TrimSpace(r.FormValue("ends_at")); end != "" {
-		if t, err := time.ParseInLocation("2006-01-02", end, loc); err == nil {
-			n.EndsAt = &t
+		d, err := time.ParseInLocation("2006-01-02", end, loc)
+		if err != nil {
+			return Net{}, fmt.Errorf("enter a valid end date, or leave it blank")
 		}
+		// Inclusive of the whole day: "stop repeating after Sept 10" should
+		// still run a net at, say, 19:00 on the 10th — not exclude it by
+		// comparing against midnight.
+		endOfDay := time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc)
+		if endOfDay.Before(n.StartsAt) {
+			return Net{}, fmt.Errorf("the end date can't be before the first occurrence")
+		}
+		n.EndsAt = &endOfDay
 	}
 	return n, nil
 }

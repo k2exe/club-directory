@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +100,63 @@ func TestRecurrenceMonthlyNthWeekday_LastFriday(t *testing.T) {
 	}
 }
 
+// Regression: an end date typed as "Sept 10" was parsed as 2026-09-10
+// 00:00 UTC and then excluded any occurrence *on* that date, since a net at
+// 19:00 is after midnight. "Stop repeating after Sept 10" should still run
+// on the 10th.
+func TestRegressionEndDateIsInclusive(t *testing.T) {
+	end := time.Date(2026, 9, 10, 23, 59, 59, 0, time.UTC)
+	n := Net{Recur: RecurDaily, StartsAt: utc(2026, 9, 1, 19, 0), EndsAt: &end}
+	occ, ok := nextOccurrenceOnOrAfter(n, utc(2026, 9, 10, 0, 0))
+	if !ok || !occ.Equal(utc(2026, 9, 10, 19, 0)) {
+		t.Fatalf("got %v, %v; want 2026-09-10 19:00 to still be included", occ, ok)
+	}
+	if _, ok := nextOccurrenceOnOrAfter(n, utc(2026, 9, 11, 0, 0)); ok {
+		t.Error("the 11th should be excluded — that's genuinely after the end date")
+	}
+}
+
+func TestNetFormRejectsUnknownRecurKind(t *testing.T) {
+	a := testApp(t)
+	admin := mustCreate(t, a, &Member{Email: "boss@example.com", Name: "Boss", CallSign: "W1BOSS",
+		Role: RoleAdmin, Status: StatusActive, TOTPEnabled: enrolled(), TOTPSecret: newTOTPSecret()})
+	form := url.Values{
+		"name": {"Sneaky Net"}, "starts_at": {"2026-09-20T14:00"}, "recur_kind": {"every_hour_on_the_hour"},
+	}
+	if code := a.post(t, "/nets", form, admin).Code; code != http.StatusSeeOther {
+		t.Fatalf("post returned %d", code)
+	}
+	for _, n := range a.store.Nets() {
+		if n.Name == "Sneaky Net" {
+			t.Fatal("a net with an unrecognized recurrence kind should have been rejected, not saved")
+		}
+	}
+}
+
+func TestSaveNetRejectsInvalidRecurrenceInvariants(t *testing.T) {
+	a := testApp(t)
+	cases := []struct {
+		name string
+		n    Net
+	}{
+		{"unknown recur kind", Net{Name: "X", StartsAt: time.Now(), Recur: RecurKind("orbital")}},
+		{"nth_week too low", Net{Name: "X", StartsAt: time.Now(), Recur: RecurMonthlyNth, NthWeek: 0, NthWeekday: time.Monday}},
+		{"nth_week too high", Net{Name: "X", StartsAt: time.Now(), Recur: RecurMonthlyNth, NthWeek: 6, NthWeekday: time.Monday}},
+		{"end before start", func() Net {
+			start := time.Now()
+			end := start.Add(-24 * time.Hour)
+			return Net{Name: "X", StartsAt: start, Recur: RecurDaily, EndsAt: &end}
+		}()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := a.store.SaveNet(c.n); err == nil {
+				t.Error("expected SaveNet to reject this, got nil error")
+			}
+		})
+	}
+}
+
 func TestRecurrenceRespectsEndsAt(t *testing.T) {
 	end := utc(2026, 9, 10, 0, 0)
 	n := Net{Recur: RecurDaily, StartsAt: utc(2026, 9, 1, 19, 0), EndsAt: &end}
@@ -132,6 +192,53 @@ func TestCheckRemindersFiresOnceAndDedups(t *testing.T) {
 	}
 	_ = member
 	_ = n
+}
+
+// Regression: sendNetReminder used to record a reminder as sent BEFORE
+// attempting delivery, so a single SMTP failure permanently lost it — no
+// later tick would ever retry, because presence in reminder_log is what
+// stops retries. A failed send must leave the reminder unrecorded so a
+// later tick (still within the catch-up window) retries and succeeds.
+func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
+	a := testApp(t)
+	member := mustCreate(t, a, &Member{Email: "reminded@example.com", Name: "R", CallSign: "W1RMD",
+		Role: RoleMember, Status: StatusActive, NetRemindOptIn: true, NetRemindLeadMinutes: 15})
+	starts := time.Now().Add(20 * time.Minute)
+	if _, err := a.store.SaveNet(Net{Name: "Test Net", Frequency: "146.850", Recur: RecurOnce, StartsAt: starts}); err != nil {
+		t.Fatal(err)
+	}
+	due := starts.Add(-15 * time.Minute)
+
+	// Point the mailer at a port nothing is listening on so delivery fails.
+	// A short timeout keeps this test fast instead of costing real seconds
+	// waiting out the production dial timeout.
+	a.mailer.Host, a.mailer.Port = "127.0.0.1", 1
+	a.mailer.DialTimeout = 200 * time.Millisecond
+
+	a.checkReminders(due)
+	if sent, err := a.store.reminderAlreadySent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
+		t.Fatal(err)
+	} else if sent {
+		t.Fatal("a reminder must not be recorded as sent when delivery failed")
+	}
+
+	// "SMTP recovers" — a later tick, still inside the catch-up window,
+	// must retry rather than having given up after the one failure.
+	a.mailer.Host = ""
+	a.checkReminders(due.Add(2 * time.Minute))
+	if sent, err := a.store.reminderAlreadySent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
+		t.Fatal(err)
+	} else if !sent {
+		t.Error("the retried reminder should now be recorded as sent")
+	}
+	// Not asserting an exact outbox file count here: mail.go's spool
+	// filenames are only millisecond+recipient precision, so a failed
+	// attempt's fallback-spool and a fast retry's own spool can collide
+	// and overwrite each other. The dedup state checked above is what
+	// actually matters for this regression.
+	if files := outboxFiles(t, a); len(files) == 0 {
+		t.Error("expected at least one outbox file after the retry")
+	}
 }
 
 func TestCheckRemindersRespectsOptOutAndAccess(t *testing.T) {
@@ -189,5 +296,29 @@ func TestRequireNetAdminAccess(t *testing.T) {
 	}
 	if code := a.get(t, "/admin", netAdmin).Code; code != 403 {
 		t.Errorf("net-admin role holder should NOT get full admin sight: /admin = %d, want 403", code)
+	}
+}
+
+// Regression: a role assignment survives a status change (nothing revokes
+// it), but the capability it grants must not. A former member holding a
+// net-admin role used to get a 200 from /nets/new.
+func TestRegressionInactiveRoleHolderLosesNetAdminAccess(t *testing.T) {
+	a := testApp(t)
+	role, err := a.store.SaveCustomRole(CustomRole{Name: "Net Admin", Color: "#7d5ba6", GrantsNetAdmin: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []Status{StatusFormer, StatusPending, StatusBanned, StatusSK} {
+		m := mustCreate(t, a, &Member{Email: string(status) + "@example.com", Name: "X",
+			CallSign: "W1" + strings.ToUpper(string(status)), Role: RoleMember, Status: status})
+		if err := a.store.SetMemberRoles(m.ID, []string{role.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if a.store.GrantsNetAdmin(m.ID) {
+			t.Errorf("%s holding a net-admin role should not grant it while inactive", status)
+		}
+		if code := a.get(t, "/nets/new", m).Code; code == http.StatusOK {
+			t.Errorf("%s: /nets/new = 200, want a non-200 (403, or a redirect for banned/SK)", status)
+		}
 	}
 }

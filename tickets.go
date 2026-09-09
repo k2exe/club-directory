@@ -115,13 +115,25 @@ func (s *Store) queryTickets(q string, args ...any) []Ticket {
 
 // CreateTicket opens a ticket in the given role's queue with an initial
 // message from the submitter.
+const (
+	maxTicketSubjectLen = 200
+	maxTicketBodyLen    = 4000
+)
+
 func (s *Store) CreateTicket(roleID, memberID, subject, body string) (Ticket, error) {
 	subject = strings.TrimSpace(subject)
+	body = strings.TrimSpace(body)
 	if subject == "" {
 		return Ticket{}, fmt.Errorf("a ticket needs a subject")
 	}
-	if strings.TrimSpace(body) == "" {
+	if len(subject) > maxTicketSubjectLen {
+		return Ticket{}, fmt.Errorf("subject is too long (%d characters, limit %d)", len(subject), maxTicketSubjectLen)
+	}
+	if body == "" {
 		return Ticket{}, fmt.Errorf("describe the issue before submitting")
+	}
+	if len(body) > maxTicketBodyLen {
+		return Ticket{}, fmt.Errorf("message is too long (%d characters, limit %d)", len(body), maxTicketBodyLen)
 	}
 	now := time.Now()
 	t := Ticket{ID: newID(), RoleID: roleID, MemberID: memberID, Subject: subject, Status: TicketOpen,
@@ -176,15 +188,19 @@ func (s *Store) MessagesForTicket(ticketID string) []TicketMessage {
 // transaction, matching how the roster's admin_status form already combines
 // a reason with a status change in a single POST.
 func (s *Store) AddTicketMessage(ticketID, authorID, authorName, body string, newStatus TicketStatus) error {
+	body = strings.TrimSpace(body)
+	if len(body) > maxTicketBodyLen {
+		return fmt.Errorf("message is too long (%d characters, limit %d)", len(body), maxTicketBodyLen)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now()
-	if strings.TrimSpace(body) != "" {
+	if body != "" {
 		if _, err := tx.Exec(`INSERT INTO ticket_messages (id, ticket_id, author_id, author_name, body, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`, newID(), ticketID, authorID, authorName, strings.TrimSpace(body), formatTime(now)); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?)`, newID(), ticketID, authorID, authorName, body, formatTime(now)); err != nil {
 			return err
 		}
 	}
@@ -197,8 +213,12 @@ func (s *Store) AddTicketMessage(ticketID, authorID, authorName, body string, ne
 
 // ---------- access ----------
 
-// canAccessTicket reports whether me may view/reply to t: the submitter, a
-// supporter holding the ticket's role, or a full admin.
+// canAccessTicket reports whether me may view/reply to t: the submitter
+// (always — needing help is legitimate even from a pending or former
+// account), a currently-eligible supporter holding the ticket's role, or a
+// full admin. A role assignment that has gone stale (the holder was
+// suspended, banned, or left) does not carry queue access — see
+// eligibleForRole.
 func (a *App) canAccessTicket(me *Member, t Ticket) bool {
 	if me == nil {
 		return false
@@ -208,6 +228,9 @@ func (a *App) canAccessTicket(me *Member, t Ticket) bool {
 	}
 	if me.ID == t.MemberID {
 		return true
+	}
+	if !eligibleForRole(me) {
+		return false
 	}
 	for _, r := range a.store.RolesFor(me.ID) {
 		if r.ID == t.RoleID {
