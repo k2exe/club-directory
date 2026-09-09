@@ -175,6 +175,23 @@ type Store struct {
 var ErrNotFound = errors.New("not found")
 var ErrDuplicate = errors.New("email already on the roster")
 
+// reminderLogSchema is factored out so the fresh-create path (below, as
+// part of schema) and migrateReminderLog's rebuild path share exactly one
+// definition — the two drifting apart is exactly how the migration bug
+// this comment is attached to happened in the first place.
+const reminderLogSchema = `
+CREATE TABLE IF NOT EXISTS reminder_log (
+	net_id        TEXT NOT NULL,
+	occurrence_at TEXT NOT NULL,
+	member_id     TEXT NOT NULL,
+	status        TEXT NOT NULL DEFAULT 'pending',
+	claim_id      TEXT NOT NULL DEFAULT '',
+	claimed_at    TEXT NOT NULL,
+	sent_at       TEXT,
+	PRIMARY KEY (net_id, occurrence_at, member_id)
+);
+`
+
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (
 	id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -251,15 +268,7 @@ CREATE TABLE IF NOT EXISTS nets (
 	created_at           TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS reminder_log (
-	net_id        TEXT NOT NULL,
-	occurrence_at TEXT NOT NULL,
-	member_id     TEXT NOT NULL,
-	status        TEXT NOT NULL DEFAULT 'pending',
-	claimed_at    TEXT NOT NULL,
-	sent_at       TEXT,
-	PRIMARY KEY (net_id, occurrence_at, member_id)
-);
+` + reminderLogSchema + `
 
 -- ---------- custom roles ----------
 
@@ -328,6 +337,10 @@ func OpenStore(dir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrating columns: %w", err)
 	}
+	if err := migrateReminderLog(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating reminder_log: %w", err)
+	}
 	s := &Store{db: db, dir: dir}
 	if err := s.ensureMeta(); err != nil {
 		db.Close()
@@ -381,6 +394,73 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n)
+	return n > 0, err
+}
+
+// migrateReminderLog rebuilds reminder_log if it exists in the shape it
+// shipped in before the reminder-claim rewrite: (net_id, occurrence_at,
+// member_id, sent_at TEXT NOT NULL) — no status column, and sent_at
+// required. columnMigrations' plain ALTER TABLE ADD COLUMN isn't enough
+// here: the old sent_at NOT NULL constraint would still reject every
+// pending claim, which by definition hasn't sent yet. This only matters
+// for a database that ran that intermediate revision — a database created
+// fresh (either before reminder_log existed at all, or after this rewrite)
+// never has the old shape, so this is a no-op for both.
+func migrateReminderLog(db *sql.DB) error {
+	exists, err := tableExists(db, "reminder_log")
+	if err != nil || !exists {
+		return err
+	}
+	current, err := hasColumn(db, "reminder_log", "claim_id")
+	if err != nil || current {
+		return err
+	}
+	// Two possible prior shapes to migrate from, both seen only in earlier
+	// revisions of this same PR, never in a released version: the very
+	// first cut (net_id, occurrence_at, member_id, sent_at NOT NULL — a row
+	// existed only once a send had already succeeded), or the one after
+	// that added status/claimed_at but not yet claim_id.
+	hadStatus, err := hasColumn(db, "reminder_log", "status")
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`ALTER TABLE reminder_log RENAME TO reminder_log_migrating`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(reminderLogSchema); err != nil {
+		return err
+	}
+	if hadStatus {
+		// Already had status/claimed_at/sent_at; just gaining claim_id,
+		// which is meaningless for a row that isn't still pending.
+		if _, err := tx.Exec(`INSERT INTO reminder_log (net_id, occurrence_at, member_id, status, claim_id, claimed_at, sent_at)
+			SELECT net_id, occurrence_at, member_id, status, '', claimed_at, sent_at FROM reminder_log_migrating`); err != nil {
+			return err
+		}
+	} else {
+		// The original shape: every existing row already succeeded in
+		// sending (that's what sent_at being NOT NULL meant), so carry it
+		// over as status='sent', backfilling claimed_at with sent_at since
+		// that schema never recorded a separate claim time.
+		if _, err := tx.Exec(`INSERT INTO reminder_log (net_id, occurrence_at, member_id, status, claim_id, claimed_at, sent_at)
+			SELECT net_id, occurrence_at, member_id, 'sent', '', sent_at, sent_at FROM reminder_log_migrating`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TABLE reminder_log_migrating`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error { return s.db.Close() }

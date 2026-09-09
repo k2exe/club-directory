@@ -513,7 +513,7 @@ func (a *App) checkReminders(now time.Time) {
 // the bug this replaced (marking sent before sending) could silently lose
 // one forever.
 func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
-	claimed, err := a.store.claimReminder(n.ID, occ, m.ID)
+	claimID, claimed, err := a.store.claimReminder(n.ID, occ, m.ID)
 	if err != nil {
 		log.Printf("reminder claim for %s: %v", m.Email, err)
 		return
@@ -540,12 +540,12 @@ func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
 `, n.Name, occ.Format("15:04 MST"), n.Frequency, repeater, mode)
 	if err := a.mailer.Send(m.Email, subject, body); err != nil {
 		log.Printf("net reminder to %s: %v (releasing claim — a later tick within the catch-up window will retry)", m.Email, err)
-		if err := a.store.releaseReminderClaim(n.ID, occ, m.ID); err != nil {
+		if err := a.store.releaseReminderClaim(n.ID, occ, m.ID, claimID); err != nil {
 			log.Printf("releasing reminder claim for %s: %v", m.Email, err)
 		}
 		return
 	}
-	if err := a.store.markReminderSent(n.ID, occ, m.ID); err != nil {
+	if err := a.store.markReminderSent(n.ID, occ, m.ID, claimID); err != nil {
 		log.Printf("recording reminder sent for %s: %v", m.Email, err)
 	}
 }
@@ -573,31 +573,43 @@ const reminderClaimStaleAfter = 5 * time.Minute
 // mid-send (the conditional UPDATE's WHERE clause makes reclaiming
 // exclusive the same way: only the first writer to reach it still sees
 // claimed_at before the cutoff). A row already "sent" is never touched.
-func (s *Store) claimReminder(netID string, occurrence time.Time, memberID string) (bool, error) {
+//
+// The returned claimID is a fresh random token written into the row and
+// must be passed back to markReminderSent/releaseReminderClaim: without it,
+// a caller whose claim went stale and got reclaimed by someone else could
+// still delete or "complete" the NEW owner's claim once it finally gets
+// around to finishing up — the token makes both of those a no-op once
+// ownership has moved on, rather than a race.
+func (s *Store) claimReminder(netID string, occurrence time.Time, memberID string) (claimID string, ok bool, err error) {
+	claimID = randToken(8)
 	now := time.Now()
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, status, claimed_at)
-		VALUES (?, ?, ?, 'pending', ?)`,
-		netID, formatTime(occurrence), memberID, formatTime(now))
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, status, claim_id, claimed_at)
+		VALUES (?, ?, ?, 'pending', ?, ?)`,
+		netID, formatTime(occurrence), memberID, claimID, formatTime(now))
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if n, err := res.RowsAffected(); err != nil || n > 0 {
-		return n > 0, err
+		return claimID, n > 0, err
 	}
-	res, err = s.db.Exec(`UPDATE reminder_log SET claimed_at = ?
+	res, err = s.db.Exec(`UPDATE reminder_log SET claim_id = ?, claimed_at = ?
 		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND status = 'pending' AND claimed_at < ?`,
-		formatTime(now), netID, formatTime(occurrence), memberID, formatTime(now.Add(-reminderClaimStaleAfter)))
+		claimID, formatTime(now), netID, formatTime(occurrence), memberID, formatTime(now.Add(-reminderClaimStaleAfter)))
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	return claimID, n > 0, err
 }
 
-func (s *Store) markReminderSent(netID string, occurrence time.Time, memberID string) error {
+// markReminderSent completes a claim, but only the one identified by
+// claimID — if it has since been reclaimed by someone else (this owner's
+// claim went stale), this is a deliberate no-op rather than marking a
+// different owner's in-progress claim as sent out from under them.
+func (s *Store) markReminderSent(netID string, occurrence time.Time, memberID, claimID string) error {
 	_, err := s.db.Exec(`UPDATE reminder_log SET status = 'sent', sent_at = ?
-		WHERE net_id = ? AND occurrence_at = ? AND member_id = ?`,
-		formatTime(time.Now()), netID, formatTime(occurrence), memberID)
+		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND claim_id = ?`,
+		formatTime(time.Now()), netID, formatTime(occurrence), memberID, claimID)
 	return err
 }
 
@@ -615,12 +627,12 @@ func (s *Store) reminderIsSent(netID string, occurrence time.Time, memberID stri
 }
 
 // releaseReminderClaim gives up a claim after a failed send so a later tick
-// can retry it. Guarded to a no-op if the row somehow already reads "sent"
-// (it can't, on the single scheduler goroutine this app actually runs, but
-// the guard costs nothing and keeps the claim/sent invariant airtight).
-func (s *Store) releaseReminderClaim(netID string, occurrence time.Time, memberID string) error {
+// can retry it — but again, only the claim identified by claimID. If it has
+// already been reclaimed by a new owner, this must not delete that new
+// claim out from under them.
+func (s *Store) releaseReminderClaim(netID string, occurrence time.Time, memberID, claimID string) error {
 	_, err := s.db.Exec(`DELETE FROM reminder_log
-		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND status != 'sent'`,
-		netID, formatTime(occurrence), memberID)
+		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND claim_id = ? AND status != 'sent'`,
+		netID, formatTime(occurrence), memberID, claimID)
 	return err
 }

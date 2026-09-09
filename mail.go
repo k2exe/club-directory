@@ -86,17 +86,35 @@ func sanitizeHeaderValue(s string) string {
 	}, s)
 }
 
+// spoolNameAttempts bounds retries on an actual filename collision. A
+// four-byte random suffix makes one vanishingly unlikely, but O_EXCL is
+// what makes "unlikely" into "detected and handled" rather than "silently
+// overwrites the previous message" if it ever does happen.
+const spoolNameAttempts = 5
+
 func (m *Mailer) spool(to, subject string, msg []byte) error {
 	if m.Outbox == "" {
 		return nil
 	}
-	// A millisecond timestamp plus recipient is not unique under concurrent
-	// sends to the same address — two HTTP handlers spooling for the same
-	// member in the same millisecond used to silently overwrite one
-	// another via os.WriteFile. A short random suffix makes the name
-	// unique regardless of clock resolution or how many land at once.
-	name := fmt.Sprintf("%s-%s-%s.eml", time.Now().Format("20060102-150405.000"), sanitizeFilename(to), randToken(4))
-	return os.WriteFile(filepath.Join(m.Outbox, name), msg, 0o600)
+	var lastErr error
+	for i := 0; i < spoolNameAttempts; i++ {
+		name := fmt.Sprintf("%s-%s-%s.eml", time.Now().Format("20060102-150405.000"), sanitizeFilename(to), randToken(4))
+		f, err := os.OpenFile(filepath.Join(m.Outbox, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if os.IsExist(err) {
+				lastErr = err
+				continue // collided — try again with a fresh random suffix
+			}
+			return err
+		}
+		_, werr := f.Write(msg)
+		cerr := f.Close()
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	return fmt.Errorf("spooling to outbox: %d consecutive filename collisions: %w", spoolNameAttempts, lastErr)
 }
 
 // dialTimeout bounds connecting to the relay; smtpDeadline bounds the whole

@@ -258,7 +258,7 @@ func TestClaimReminderIsAtomicUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			claimed, err := a.store.claimReminder("net1", occ, "member1")
+			_, claimed, err := a.store.claimReminder("net1", occ, "member1")
 			if err != nil {
 				t.Error(err)
 				return
@@ -288,7 +288,7 @@ func TestClaimReminderIsAtomicUnderConcurrency(t *testing.T) {
 func TestClaimReminderReclaimsOnlyAfterGoingStale(t *testing.T) {
 	a := testApp(t)
 	occ := time.Now().Add(time.Hour)
-	if claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
+	if _, claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
 		t.Fatalf("initial claim: claimed=%v err=%v", claimed, err)
 	}
 	// Simulate the claim having crashed (never released or marked sent) a
@@ -297,16 +297,79 @@ func TestClaimReminderReclaimsOnlyAfterGoingStale(t *testing.T) {
 	if _, err := a.store.db.Exec(`UPDATE reminder_log SET claimed_at = ? WHERE net_id = 'net1'`, formatTime(old)); err != nil {
 		t.Fatal(err)
 	}
-	if claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
+	if _, claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
 		t.Fatalf("stale reclaim: claimed=%v err=%v, want true", claimed, err)
 	}
 
 	// A claim from a moment ago (not stale) must not be reclaimable.
-	if claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || !claimed {
+	if _, claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || !claimed {
 		t.Fatalf("fresh claim on net2: claimed=%v err=%v", claimed, err)
 	}
-	if claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || claimed {
+	if _, claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || claimed {
 		t.Errorf("reclaiming a fresh (non-stale) pending claim should fail, got claimed=%v err=%v", claimed, err)
+	}
+}
+
+// Regression: the exact scenario from review — worker A's claim goes stale,
+// worker B reclaims it, then A (unaware it lost ownership) finally gets
+// around to finishing its send and tries to complete or release "its"
+// claim. Without an ownership token, A's call would silently act on B's
+// claim: marking B's still-in-progress send as done prematurely, or
+// deleting it out from under B. With the token, A's stale claimID no
+// longer matches the row, so both calls become no-ops.
+func TestRegressionStaleClaimCannotClobberNewOwner(t *testing.T) {
+	a := testApp(t)
+	occ := time.Now().Add(time.Hour)
+
+	claimA, ok, err := a.store.claimReminder("net1", occ, "member1")
+	if err != nil || !ok {
+		t.Fatalf("worker A's claim: ok=%v err=%v", ok, err)
+	}
+	old := time.Now().Add(-reminderClaimStaleAfter - time.Minute)
+	if _, err := a.store.db.Exec(`UPDATE reminder_log SET claimed_at = ? WHERE net_id = 'net1'`, formatTime(old)); err != nil {
+		t.Fatal(err)
+	}
+	claimB, ok, err := a.store.claimReminder("net1", occ, "member1")
+	if err != nil || !ok {
+		t.Fatalf("worker B's reclaim: ok=%v err=%v", ok, err)
+	}
+	if claimA == claimB {
+		t.Fatal("test setup broken: A and B ended up with the same claim ID")
+	}
+
+	// A, unaware it lost the claim, tries to release it (simulating its
+	// delayed send having failed) — must not touch B's now-current claim.
+	if err := a.store.releaseReminderClaim("net1", occ, "member1", claimA); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := a.store.reminderIsSent("net1", occ, "member1"); err != nil {
+		t.Fatal(err)
+	} else if sent {
+		t.Fatal("should not be marked sent yet")
+	}
+	var stillPending int
+	a.store.db.QueryRow(`SELECT COUNT(*) FROM reminder_log WHERE net_id = 'net1' AND claim_id = ?`, claimB).Scan(&stillPending)
+	if stillPending != 1 {
+		t.Fatal("worker A's release (using its stale claim ID) deleted worker B's current claim")
+	}
+
+	// A also tries to mark its (stale) claim sent — must not mark B's
+	// still-pending claim as sent.
+	if err := a.store.markReminderSent("net1", occ, "member1", claimA); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := a.store.reminderIsSent("net1", occ, "member1"); err != nil {
+		t.Fatal(err)
+	} else if sent {
+		t.Fatal("worker A's mark-sent (using its stale claim ID) marked worker B's claim as sent")
+	}
+
+	// B, the actual current owner, can still legitimately complete it.
+	if err := a.store.markReminderSent("net1", occ, "member1", claimB); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := a.store.reminderIsSent("net1", occ, "member1"); err != nil || !sent {
+		t.Fatalf("B's own mark-sent should have succeeded: sent=%v err=%v", sent, err)
 	}
 }
 
