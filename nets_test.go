@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -142,6 +143,8 @@ func TestSaveNetRejectsInvalidRecurrenceInvariants(t *testing.T) {
 		{"unknown recur kind", Net{Name: "X", StartsAt: time.Now(), Recur: RecurKind("orbital")}},
 		{"nth_week too low", Net{Name: "X", StartsAt: time.Now(), Recur: RecurMonthlyNth, NthWeek: 0, NthWeekday: time.Monday}},
 		{"nth_week too high", Net{Name: "X", StartsAt: time.Now(), Recur: RecurMonthlyNth, NthWeek: 6, NthWeekday: time.Monday}},
+		{"nth_weekday out of range", Net{Name: "X", StartsAt: time.Now(), Recur: RecurMonthlyNth, NthWeek: 2, NthWeekday: time.Weekday(99)}},
+		{"weekday mask has invalid bits", Net{Name: "X", StartsAt: time.Now(), Recur: RecurWeekly, WeekdaysMask: 1 << 10}},
 		{"end before start", func() Net {
 			start := time.Now()
 			end := start.Add(-24 * time.Hour)
@@ -216,7 +219,7 @@ func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
 	a.mailer.DialTimeout = 200 * time.Millisecond
 
 	a.checkReminders(due)
-	if sent, err := a.store.reminderAlreadySent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
+	if sent, err := a.store.reminderIsSent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
 		t.Fatal(err)
 	} else if sent {
 		t.Fatal("a reminder must not be recorded as sent when delivery failed")
@@ -226,7 +229,7 @@ func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
 	// must retry rather than having given up after the one failure.
 	a.mailer.Host = ""
 	a.checkReminders(due.Add(2 * time.Minute))
-	if sent, err := a.store.reminderAlreadySent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
+	if sent, err := a.store.reminderIsSent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
 		t.Fatal(err)
 	} else if !sent {
 		t.Error("the retried reminder should now be recorded as sent")
@@ -238,6 +241,72 @@ func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
 	// actually matters for this regression.
 	if files := outboxFiles(t, a); len(files) == 0 {
 		t.Error("expected at least one outbox file after the retry")
+	}
+}
+
+// The claim itself must be atomic: concurrent callers racing for the same
+// (net, occurrence, member) tuple must have exactly one winner, never zero
+// and never more than one — this is the actual guarantee behind the
+// at-least-once documentation on sendNetReminder.
+func TestClaimReminderIsAtomicUnderConcurrency(t *testing.T) {
+	a := testApp(t)
+	occ := time.Now().Add(time.Hour)
+	const n = 50
+	results := make(chan bool, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := a.store.claimReminder("net1", occ, "member1")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	claims := 0
+	for c := range results {
+		if c {
+			claims++
+		}
+	}
+	if claims != 1 {
+		t.Errorf("got %d successful claims out of %d concurrent attempts, want exactly 1", claims, n)
+	}
+}
+
+// A claim left "pending" by a process that crashed before releasing or
+// marking it sent must eventually become reclaimable — otherwise a single
+// crash mid-send permanently blocks that reminder, same class of bug as
+// the original lost-reminder issue. But it must NOT be reclaimable while
+// still fresh, or two processes really could send the same reminder twice
+// well within a normal retry window.
+func TestClaimReminderReclaimsOnlyAfterGoingStale(t *testing.T) {
+	a := testApp(t)
+	occ := time.Now().Add(time.Hour)
+	if claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
+		t.Fatalf("initial claim: claimed=%v err=%v", claimed, err)
+	}
+	// Simulate the claim having crashed (never released or marked sent) a
+	// while ago by backdating it directly.
+	old := time.Now().Add(-reminderClaimStaleAfter - time.Minute)
+	if _, err := a.store.db.Exec(`UPDATE reminder_log SET claimed_at = ? WHERE net_id = 'net1'`, formatTime(old)); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := a.store.claimReminder("net1", occ, "member1"); err != nil || !claimed {
+		t.Fatalf("stale reclaim: claimed=%v err=%v, want true", claimed, err)
+	}
+
+	// A claim from a moment ago (not stale) must not be reclaimable.
+	if claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || !claimed {
+		t.Fatalf("fresh claim on net2: claimed=%v err=%v", claimed, err)
+	}
+	if claimed, err := a.store.claimReminder("net2", occ, "member1"); err != nil || claimed {
+		t.Errorf("reclaiming a fresh (non-stale) pending claim should fail, got claimed=%v err=%v", claimed, err)
 	}
 }
 

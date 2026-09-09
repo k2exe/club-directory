@@ -255,7 +255,9 @@ CREATE TABLE IF NOT EXISTS reminder_log (
 	net_id        TEXT NOT NULL,
 	occurrence_at TEXT NOT NULL,
 	member_id     TEXT NOT NULL,
-	sent_at       TEXT NOT NULL,
+	status        TEXT NOT NULL DEFAULT 'pending',
+	claimed_at    TEXT NOT NULL,
+	sent_at       TEXT,
 	PRIMARY KEY (net_id, occurrence_at, member_id)
 );
 

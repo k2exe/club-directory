@@ -744,10 +744,14 @@ func (a *App) handleTicketsList(w http.ResponseWriter, r *http.Request) {
 		mine = append(mine, a.decorateTicket(t))
 	}
 	queues := map[string][]ticketRow{}
-	roles := a.store.RolesFor(me.ID)
-	if accessOf(me) == AccessAdmin {
+	var roles []CustomRole
+	switch {
+	case accessOf(me) == AccessAdmin:
 		roles = a.store.CustomRoles() // full admins support every queue
-	}
+	case eligibleForRole(me):
+		roles = a.store.RolesFor(me.ID)
+	} // else: a pending/former/banned/SK account sees only "Mine" above,
+	// even if it still holds a role assignment that has since gone stale.
 	for _, role := range roles {
 		var list []ticketRow
 		for _, t := range a.store.TicketsForRole(role.ID) {

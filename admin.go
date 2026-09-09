@@ -319,7 +319,7 @@ func (a *App) handleAdminRoleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.DeleteCustomRole(id); err != nil {
 		if errors.Is(err, ErrRoleHasTickets) {
-			a.fail(w, r, "This role still has tickets in its queue. Resolve or reassign them before deleting the role.", "/admin/roles")
+			a.fail(w, r, "This role has ticket history and can't be deleted — role names are kept permanently once a ticket has used them, to preserve support history. Rename or recolor it instead.", "/admin/roles")
 			return
 		}
 		a.fail(w, r, "Could not delete that role.", "/admin/roles")

@@ -38,7 +38,11 @@ func (m *Mailer) Configured() bool { return m.Host != "" }
 func (m *Mailer) Send(to, subject, body string) error {
 	msg := m.compose(to, subject, body)
 	if m.Echo || !m.Configured() {
-		log.Printf("mail to %s: %s\n%s", to, subject, indent(body))
+		// Sanitized for the same reason compose() sanitizes the header
+		// values: to and subject are member-controlled, and an
+		// unsanitized CR/LF here would forge fake log lines even though
+		// it can no longer forge mail headers.
+		log.Printf("mail to %s: %s\n%s", sanitizeHeaderValue(to), sanitizeHeaderValue(subject), indent(body))
 	}
 	if !m.Configured() {
 		return m.spool(to, subject, msg)
@@ -86,7 +90,12 @@ func (m *Mailer) spool(to, subject string, msg []byte) error {
 	if m.Outbox == "" {
 		return nil
 	}
-	name := fmt.Sprintf("%s-%s.eml", time.Now().Format("20060102-150405.000"), sanitizeFilename(to))
+	// A millisecond timestamp plus recipient is not unique under concurrent
+	// sends to the same address — two HTTP handlers spooling for the same
+	// member in the same millisecond used to silently overwrite one
+	// another via os.WriteFile. A short random suffix makes the name
+	// unique regardless of clock resolution or how many land at once.
+	name := fmt.Sprintf("%s-%s-%s.eml", time.Now().Format("20060102-150405.000"), sanitizeFilename(to), randToken(4))
 	return os.WriteFile(filepath.Join(m.Outbox, name), msg, 0o600)
 }
 

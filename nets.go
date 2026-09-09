@@ -248,8 +248,16 @@ func (s *Store) SaveNet(n Net) (Net, error) {
 	if !validRecurKind(n.Recur) {
 		return Net{}, fmt.Errorf("%q is not a valid recurrence", n.Recur)
 	}
-	if n.Recur == RecurMonthlyNth && (n.NthWeek < 1 || n.NthWeek > 5) {
-		return Net{}, fmt.Errorf("nth week must be 1-5 (5 = last), got %d", n.NthWeek)
+	if n.Recur == RecurMonthlyNth {
+		if n.NthWeek < 1 || n.NthWeek > 5 {
+			return Net{}, fmt.Errorf("nth week must be 1-5 (5 = last), got %d", n.NthWeek)
+		}
+		if n.NthWeekday < time.Sunday || n.NthWeekday > time.Saturday {
+			return Net{}, fmt.Errorf("nth weekday must be 0-6 (Sunday-Saturday), got %d", int(n.NthWeekday))
+		}
+	}
+	if n.WeekdaysMask&^allDaysMask != 0 {
+		return Net{}, fmt.Errorf("weekday mask has bits set outside Sunday-Saturday: %d", n.WeekdaysMask)
 	}
 	if n.EndsAt != nil && n.EndsAt.Before(n.StartsAt) {
 		return Net{}, fmt.Errorf("end date cannot be before the first occurrence")
@@ -489,20 +497,29 @@ func (a *App) checkReminders(now time.Time) {
 	}
 }
 
-// sendNetReminder checks the reminder isn't already sent, sends it, and only
-// then records it as sent — never the other way around. Recording success
-// before attempting delivery would mean a single SMTP hiccup permanently
-// loses that reminder, since presence in reminder_log is what stops every
-// later tick from retrying it. Checked-then-sent-then-recorded is safe here
-// because checkReminders only ever runs on one goroutine at a time.
+// sendNetReminder atomically claims the (net, occurrence, member) tuple,
+// sends, and marks it sent only on success — releasing the claim on failure
+// so a later tick retries instead of the reminder being lost.
+//
+// Delivery guarantee: at-least-once, not exactly-once. The claim itself is
+// atomic at the database level (a single conditional INSERT ... ON CONFLICT,
+// so it is safe even if this database were ever shared by more than one
+// process — it isn't, today: this app is single-process by design, one
+// SQLite connection, one scheduler goroutine). The unavoidable gap is a
+// crash between Mailer.Send returning success and the UPDATE that records
+// it: on restart nothing remembers the send happened, so that occurrence
+// could be retried and a member could rarely get the same reminder twice.
+// That is the accepted tradeoff — a duplicate reminder is a minor annoyance;
+// the bug this replaced (marking sent before sending) could silently lose
+// one forever.
 func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
-	already, err := a.store.reminderAlreadySent(n.ID, occ, m.ID)
+	claimed, err := a.store.claimReminder(n.ID, occ, m.ID)
 	if err != nil {
-		log.Printf("reminder dedup check for %s: %v", m.Email, err)
+		log.Printf("reminder claim for %s: %v", m.Email, err)
 		return
 	}
-	if already {
-		return
+	if !claimed {
+		return // already sent, or another process holds the claim
 	}
 	repeater := ""
 	if n.RepeaterID != "" {
@@ -522,7 +539,10 @@ func (a *App) sendNetReminder(n Net, m *Member, occ time.Time) {
 — NetRemind
 `, n.Name, occ.Format("15:04 MST"), n.Frequency, repeater, mode)
 	if err := a.mailer.Send(m.Email, subject, body); err != nil {
-		log.Printf("net reminder to %s: %v (not recorded as sent — a later tick within the catch-up window will retry)", m.Email, err)
+		log.Printf("net reminder to %s: %v (releasing claim — a later tick within the catch-up window will retry)", m.Email, err)
+		if err := a.store.releaseReminderClaim(n.ID, occ, m.ID); err != nil {
+			log.Printf("releasing reminder claim for %s: %v", m.Email, err)
+		}
 		return
 	}
 	if err := a.store.markReminderSent(n.ID, occ, m.ID); err != nil {
@@ -539,21 +559,68 @@ func (a *App) runReminderScheduler() {
 	}
 }
 
-// markReminderSent records the send in reminder_log and reports whether this
-// call was the one that actually inserted it (false = already sent).
-func (s *Store) reminderAlreadySent(netID string, occurrence time.Time, memberID string) (bool, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM reminder_log WHERE net_id = ? AND occurrence_at = ? AND member_id = ?`,
-		netID, formatTime(occurrence), memberID).Scan(&n)
+// reminderClaimStaleAfter bounds how long a "pending" claim is honored
+// without being marked sent before it's assumed abandoned (a crash between
+// claiming and sending) and eligible for another attempt to reclaim it.
+const reminderClaimStaleAfter = 5 * time.Minute
+
+// claimReminder gives mutually-exclusive ownership of a (net, occurrence,
+// member) tuple to exactly one caller, so two callers racing for the same
+// tuple can never both believe they should send it. Two ways to win: the
+// row doesn't exist yet (plain INSERT, PRIMARY KEY makes this exclusive on
+// its own), or it exists but is "pending" and stale — old enough that
+// whoever claimed it before almost certainly crashed rather than being
+// mid-send (the conditional UPDATE's WHERE clause makes reclaiming
+// exclusive the same way: only the first writer to reach it still sees
+// claimed_at before the cutoff). A row already "sent" is never touched.
+func (s *Store) claimReminder(netID string, occurrence time.Time, memberID string) (bool, error) {
+	now := time.Now()
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, status, claimed_at)
+		VALUES (?, ?, ?, 'pending', ?)`,
+		netID, formatTime(occurrence), memberID, formatTime(now))
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return n > 0, err
+	}
+	res, err = s.db.Exec(`UPDATE reminder_log SET claimed_at = ?
+		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND status = 'pending' AND claimed_at < ?`,
+		formatTime(now), netID, formatTime(occurrence), memberID, formatTime(now.Add(-reminderClaimStaleAfter)))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
 	return n > 0, err
 }
 
-// markReminderSent records a successful send. INSERT OR IGNORE rather than a
-// plain INSERT purely as a belt-and-suspenders against the primary key
-// already existing; the real dedup guarantee is reminderAlreadySent being
-// checked before every send attempt.
 func (s *Store) markReminderSent(netID string, occurrence time.Time, memberID string) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO reminder_log (net_id, occurrence_at, member_id, sent_at)
-		VALUES (?, ?, ?, ?)`, netID, formatTime(occurrence), memberID, formatTime(time.Now()))
+	_, err := s.db.Exec(`UPDATE reminder_log SET status = 'sent', sent_at = ?
+		WHERE net_id = ? AND occurrence_at = ? AND member_id = ?`,
+		formatTime(time.Now()), netID, formatTime(occurrence), memberID)
+	return err
+}
+
+// reminderIsSent reports the final state, for tests — claimReminder's
+// return value answers "did I just get the claim," which isn't the same
+// question.
+func (s *Store) reminderIsSent(netID string, occurrence time.Time, memberID string) (bool, error) {
+	var status string
+	err := s.db.QueryRow(`SELECT status FROM reminder_log WHERE net_id = ? AND occurrence_at = ? AND member_id = ?`,
+		netID, formatTime(occurrence), memberID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return status == "sent", err
+}
+
+// releaseReminderClaim gives up a claim after a failed send so a later tick
+// can retry it. Guarded to a no-op if the row somehow already reads "sent"
+// (it can't, on the single scheduler goroutine this app actually runs, but
+// the guard costs nothing and keeps the claim/sent invariant airtight).
+func (s *Store) releaseReminderClaim(netID string, occurrence time.Time, memberID string) error {
+	_, err := s.db.Exec(`DELETE FROM reminder_log
+		WHERE net_id = ? AND occurrence_at = ? AND member_id = ? AND status != 'sent'`,
+		netID, formatTime(occurrence), memberID)
 	return err
 }

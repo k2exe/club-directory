@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,32 @@ func TestTicketCreationIsRateLimited(t *testing.T) {
 		if tk.Subject == "One too many" {
 			t.Error("the 4th ticket within the rate-limit window should have been refused, not created")
 		}
+	}
+}
+
+// Regression: /tickets built its "queues I support" section from
+// a.store.RolesFor(me.ID) with no eligibility check, so a former supporter
+// — detail access already correctly denied via canAccessTicket — could
+// still see the ticket's subject and status listed on the /tickets page
+// itself. This is an HTTP-level test on purpose: a store-level check on
+// canAccessTicket alone would not have caught a second, separate call site
+// that forgot to gate on eligibleForRole.
+func TestRegressionInactiveSupporterCannotListQueueTickets(t *testing.T) {
+	a := testApp(t)
+	role, submitter, supporter1, _, _ := setupTicketFixture(t, a)
+	_, err := a.store.CreateTicket(role.ID, submitter.ID, "Confidential subject line", "details")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.store.Update(supporter1.ID, func(x *Member) error { x.Status = StatusFormer; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	supporter1, _ = a.store.ByID(supporter1.ID)
+
+	body := a.get(t, "/tickets", supporter1).Body.String()
+	if strings.Contains(body, "Confidential subject line") {
+		t.Error("a former supporter's /tickets page still lists a ticket from a queue they no longer support")
 	}
 }
 

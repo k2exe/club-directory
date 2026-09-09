@@ -133,10 +133,16 @@ func (s *Store) SaveCustomRole(r CustomRole) (CustomRole, error) {
 
 var ErrRoleHasTickets = errors.New("role still has tickets")
 
-// DeleteCustomRole refuses to delete a role that still has tickets — the
-// tickets table has no ON DELETE CASCADE on role_id specifically so this
-// can never happen by accident, but check first for a clear error rather
-// than surfacing the raw FOREIGN KEY constraint failure.
+// DeleteCustomRole refuses to delete a role that has ever had a ticket —
+// tickets.role_id has no ON DELETE CASCADE, specifically so this can't
+// happen by accident, but this checks first for a clear error rather than
+// surfacing the raw FOREIGN KEY constraint failure. Note this is permanent:
+// there is no ticket-reassignment or archival feature (yet), so a role that
+// has received even one ticket, resolved or not, can never be deleted
+// through the app — only renamed, recolored, or have its capabilities
+// changed. That is a deliberate tradeoff (ticket history over a tidy role
+// list) and the admin-facing copy says so, rather than suggesting "resolve
+// or reassign" will unblock it when nothing currently does.
 func (s *Store) DeleteCustomRole(id string) error {
 	var n int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM tickets WHERE role_id = ?", id).Scan(&n); err != nil {
