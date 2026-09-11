@@ -1,0 +1,13 @@
+{{define "colorpicker"}}
+<label>Color</label>
+<div class="swatch-picker">
+  {{range colorPresets}}
+  <span>
+    <input type="radio" id="c-{{.Class}}" name="color_preset" value="{{.Hex}}" class="sr swatch-radio" {{if eq .Hex $}}checked{{end}}>
+    <label for="c-{{.Class}}" class="swatch {{.Class}}" title="{{.Name}}"></label>
+  </span>
+  {{end}}
+</div>
+<p class="swatch-custom"><span>or pick any color:</span>
+  <input type="color" name="color_custom" value="{{if $}}{{$}}{{else}}#55606b{{end}}"></p>
+{{end}}

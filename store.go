@@ -124,6 +124,11 @@ type Member struct {
 	JoinedAt    time.Time  `json:"joined_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+
+	// NetRemind: opt-in reminder email before a scheduled net. LeadMinutes is
+	// meaningless while OptIn is false.
+	NetRemindOptIn       bool `json:"net_remind_opt_in"`
+	NetRemindLeadMinutes int  `json:"net_remind_lead_minutes"`
 }
 
 func (m *Member) IsAdmin() bool { return m.Role == RoleAdmin }
@@ -170,6 +175,23 @@ type Store struct {
 var ErrNotFound = errors.New("not found")
 var ErrDuplicate = errors.New("email already on the roster")
 
+// reminderLogSchema is factored out so the fresh-create path (below, as
+// part of schema) and migrateReminderLog's rebuild path share exactly one
+// definition — the two drifting apart is exactly how the migration bug
+// this comment is attached to happened in the first place.
+const reminderLogSchema = `
+CREATE TABLE IF NOT EXISTS reminder_log (
+	net_id        TEXT NOT NULL,
+	occurrence_at TEXT NOT NULL,
+	member_id     TEXT NOT NULL,
+	status        TEXT NOT NULL DEFAULT 'pending',
+	claim_id      TEXT NOT NULL DEFAULT '',
+	claimed_at    TEXT NOT NULL,
+	sent_at       TEXT,
+	PRIMARY KEY (net_id, occurrence_at, member_id)
+);
+`
+
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (
 	id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -212,10 +234,78 @@ CREATE TABLE IF NOT EXISTS members (
 	totp_last_step     INTEGER NOT NULL DEFAULT 0,
 	backup_codes       TEXT NOT NULL DEFAULT '[]',
 	session_epoch      INTEGER NOT NULL DEFAULT 0,
+
 	admin_notes        TEXT NOT NULL DEFAULT '',
 	joined_at          TEXT NOT NULL,
 	updated_at         TEXT NOT NULL,
-	last_login_at      TEXT
+	last_login_at      TEXT,
+	net_remind_opt_in     INTEGER NOT NULL DEFAULT 0,
+	net_remind_lead_mins  INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------- NetRemind ----------
+
+CREATE TABLE IF NOT EXISTS repeaters (
+	id         TEXT PRIMARY KEY,
+	name       TEXT NOT NULL,
+	frequency  TEXT NOT NULL DEFAULT '',
+	notes      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS nets (
+	id                   TEXT PRIMARY KEY,
+	name                 TEXT NOT NULL,
+	frequency            TEXT NOT NULL DEFAULT '',
+	repeater_id          TEXT REFERENCES repeaters(id) ON DELETE SET NULL,
+	mode                 TEXT NOT NULL DEFAULT '',
+	starts_at            TEXT NOT NULL,
+	recur_kind           TEXT NOT NULL,
+	recur_weekdays_mask  INTEGER NOT NULL DEFAULT 0,
+	recur_nth_week       INTEGER NOT NULL DEFAULT 0,
+	recur_nth_weekday    INTEGER NOT NULL DEFAULT 0,
+	ends_at              TEXT,
+	created_by           TEXT NOT NULL DEFAULT '',
+	created_at           TEXT NOT NULL
+);
+
+` + reminderLogSchema + `
+
+-- ---------- custom roles ----------
+
+CREATE TABLE IF NOT EXISTS custom_roles (
+	id                TEXT PRIMARY KEY,
+	name              TEXT NOT NULL UNIQUE,
+	color             TEXT NOT NULL,
+	is_lifecycle      INTEGER NOT NULL DEFAULT 0,
+	grants_net_admin  INTEGER NOT NULL DEFAULT 0,
+	created_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS member_roles (
+	member_id  TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+	role_id    TEXT NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
+	PRIMARY KEY (member_id, role_id)
+);
+
+-- ---------- tickets ----------
+
+CREATE TABLE IF NOT EXISTS tickets (
+	id          TEXT PRIMARY KEY,
+	role_id     TEXT NOT NULL REFERENCES custom_roles(id),
+	member_id   TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+	subject     TEXT NOT NULL,
+	status      TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticket_messages (
+	id          TEXT PRIMARY KEY,
+	ticket_id   TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+	author_id   TEXT NOT NULL DEFAULT '',
+	author_name TEXT NOT NULL DEFAULT '',
+	body        TEXT NOT NULL,
+	created_at  TEXT NOT NULL
 );
 `
 
@@ -243,12 +333,134 @@ func OpenStore(dir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrating schema: %w", err)
 	}
+	if err := migrateColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating columns: %w", err)
+	}
+	if err := migrateReminderLog(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating reminder_log: %w", err)
+	}
 	s := &Store{db: db, dir: dir}
 	if err := s.ensureMeta(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// columnMigrations lists columns added to existing tables after their first
+// release. CREATE TABLE IF NOT EXISTS above is a no-op against a database
+// that already has the table, so a brand new column needs its own ALTER
+// TABLE here or every store opened against pre-existing data starts
+// returning "no such column" the moment a query touches it.
+var columnMigrations = []struct{ table, column, ddl string }{
+	{"members", "net_remind_opt_in", "INTEGER NOT NULL DEFAULT 0"},
+	{"members", "net_remind_lead_mins", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+func migrateColumns(db *sql.DB) error {
+	for _, m := range columnMigrations {
+		has, err := hasColumn(db, m.table, m.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.table, m.column, m.ddl)); err != nil {
+			return fmt.Errorf("adding %s.%s: %w", m.table, m.column, err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n)
+	return n > 0, err
+}
+
+// migrateReminderLog rebuilds reminder_log if it exists in the shape it
+// shipped in before the reminder-claim rewrite: (net_id, occurrence_at,
+// member_id, sent_at TEXT NOT NULL) — no status column, and sent_at
+// required. columnMigrations' plain ALTER TABLE ADD COLUMN isn't enough
+// here: the old sent_at NOT NULL constraint would still reject every
+// pending claim, which by definition hasn't sent yet. This only matters
+// for a database that ran that intermediate revision — a database created
+// fresh (either before reminder_log existed at all, or after this rewrite)
+// never has the old shape, so this is a no-op for both.
+func migrateReminderLog(db *sql.DB) error {
+	exists, err := tableExists(db, "reminder_log")
+	if err != nil || !exists {
+		return err
+	}
+	current, err := hasColumn(db, "reminder_log", "claim_id")
+	if err != nil || current {
+		return err
+	}
+	// Two possible prior shapes to migrate from, both seen only in earlier
+	// revisions of this same PR, never in a released version: the very
+	// first cut (net_id, occurrence_at, member_id, sent_at NOT NULL — a row
+	// existed only once a send had already succeeded), or the one after
+	// that added status/claimed_at but not yet claim_id.
+	hadStatus, err := hasColumn(db, "reminder_log", "status")
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`ALTER TABLE reminder_log RENAME TO reminder_log_migrating`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(reminderLogSchema); err != nil {
+		return err
+	}
+	if hadStatus {
+		// Already had status/claimed_at/sent_at; just gaining claim_id,
+		// which is meaningless for a row that isn't still pending.
+		if _, err := tx.Exec(`INSERT INTO reminder_log (net_id, occurrence_at, member_id, status, claim_id, claimed_at, sent_at)
+			SELECT net_id, occurrence_at, member_id, status, '', claimed_at, sent_at FROM reminder_log_migrating`); err != nil {
+			return err
+		}
+	} else {
+		// The original shape: every existing row already succeeded in
+		// sending (that's what sent_at being NOT NULL meant), so carry it
+		// over as status='sent', backfilling claimed_at with sent_at since
+		// that schema never recorded a separate claim time.
+		if _, err := tx.Exec(`INSERT INTO reminder_log (net_id, occurrence_at, member_id, status, claim_id, claimed_at, sent_at)
+			SELECT net_id, occurrence_at, member_id, 'sent', '', sent_at, sent_at FROM reminder_log_migrating`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TABLE reminder_log_migrating`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -331,6 +543,7 @@ func scanMember(row scanner) (*Member, error) {
 	var totpEnabledAt, lastLoginAt sql.NullString
 	var backupCodes string
 	var shareEmail, sharePhone, shareAddress, sharePhoto, needsReview int
+	var netRemindOptIn int
 
 	err := row.Scan(
 		&m.ID, &m.Email, &m.Name, &m.CallSign, &m.Role,
@@ -341,10 +554,12 @@ func scanMember(row scanner) (*Member, error) {
 		&shareEmail, &sharePhone, &shareAddress, &sharePhoto, &needsReview,
 		&m.TOTPSecret, &totpEnabledAt, &m.TOTPLastStep, &backupCodes, &m.SessionEpoch,
 		&m.AdminNotes, &joinedAt, &updatedAt, &lastLoginAt,
+		&netRemindOptIn, &m.NetRemindLeadMinutes,
 	)
 	if err != nil {
 		return nil, err
 	}
+	m.NetRemindOptIn = netRemindOptIn != 0
 	m.StatusChangedAt = parseTime(statusChangedAt)
 	m.JoinedAt = parseTime(joinedAt)
 	m.UpdatedAt = parseTime(updatedAt)
@@ -376,6 +591,7 @@ var memberCols = []string{
 	"share_email", "share_phone", "share_address", "share_photo", "needs_review",
 	"totp_secret", "totp_enabled_at", "totp_last_step", "backup_codes", "session_epoch",
 	"admin_notes", "joined_at", "updated_at", "last_login_at",
+	"net_remind_opt_in", "net_remind_lead_mins",
 }
 
 var memberColumns = strings.Join(memberCols, ", ")
@@ -394,6 +610,7 @@ func (m *Member) values() []any {
 		boolToInt(m.NeedsReview),
 		m.TOTPSecret, nullableTime(m.TOTPEnabled), m.TOTPLastStep, string(codes), m.SessionEpoch,
 		m.AdminNotes, formatTime(m.JoinedAt), formatTime(m.UpdatedAt), nullableTime(m.LastLoginAt),
+		boolToInt(m.NetRemindOptIn), m.NetRemindLeadMinutes,
 	}
 }
 
@@ -578,6 +795,18 @@ func accessOf(m *Member) Access {
 	}
 	return AccessNone
 }
+
+// eligibleForRole is the one place that decides whether a custom-role
+// assignment (net-admin capability, ticket-queue support, lifecycle alerts)
+// is currently "live." Holding a role is not enough on its own: a member
+// who has been suspended, banned, marked silent key, or left the club still
+// has the member_roles row (nothing revokes it on a status change), but
+// none of that role's capabilities should still work for them. Every HTTP
+// check and every notification recipient list calls this exact function so
+// the two can never drift apart, per the review that flagged the original
+// gap. A pending or former member keeps AccessSelf for their own record on
+// purpose (see accessOf) — that is deliberately NOT enough here.
+func eligibleForRole(m *Member) bool { return accessOf(m) >= AccessMember }
 
 func audienceFor(viewer *Member) Audience {
 	switch accessOf(viewer) {

@@ -1,0 +1,45 @@
+{{define "content"}}
+<p class="crumb"><a href="/admin">← Roster</a></p>
+<div class="headrow">
+  <div>
+    <p class="eyebrow">Admin</p>
+    <h1 class="page-title">Repeaters</h1>
+    <p class="lede">Named repeaters (e.g. "Clay VHF", "Clay UHF") a net can optionally link to.</p>
+  </div>
+</div>
+
+<div class="cols">
+  <section class="panel">
+    <h2 class="panel-title">Existing repeaters</h2>
+    {{range .Data.Repeaters}}
+    <div class="ticketrow">
+      <div>
+        <span class="strong">{{.Name}}</span>
+        {{if .Frequency}} <span class="mono">{{.Frequency}}</span>{{end}}
+        {{if .Notes}}<br><span class="quiet small">{{.Notes}}</span>{{end}}
+      </div>
+      <form method="post" action="/admin/repeaters/{{.ID}}/delete" class="inline">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button class="linkish danger" type="submit">Delete</button>
+      </form>
+    </div>
+    {{else}}
+    <p class="quiet">No repeaters yet — nets can still be scheduled with a plain frequency.</p>
+    {{end}}
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">Add a repeater</h2>
+    <form method="post" action="/admin/repeaters" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label for="rpname">Name</label>
+      <input id="rpname" name="name" required placeholder="Clay VHF">
+      <label for="rpfreq">Frequency</label>
+      <input id="rpfreq" name="frequency" placeholder="146.850 MHz, -0.6, PL 100.0">
+      <label for="rpnotes">Notes</label>
+      <textarea id="rpnotes" name="notes" rows="2"></textarea>
+      <button class="btn" type="submit">Add repeater</button>
+    </form>
+  </section>
+</div>
+{{end}}

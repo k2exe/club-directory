@@ -95,6 +95,26 @@
       <p class="quiet">Signing in: email link{{if $m.MFAOn}} plus an authenticator code{{end}}.</p>
       <p><a class="btn btn-quiet" href="/account/security">Manage two-step verification</a></p>
     </section>
+
+    <section class="panel">
+      <h2 class="panel-title">NetRemind</h2>
+      <p class="quiet">Get an email before each scheduled net. See the <a href="/nets">nets list</a>.</p>
+      <form method="post" action="/account/netremind" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label class="check"><input type="checkbox" name="net_remind_opt_in" {{if $m.NetRemindOptIn}}checked{{end}}>
+          <span>Email me a reminder before nets</span></label>
+        <label for="lead">Remind me</label>
+        <select id="lead" name="net_remind_lead">
+          <option value="60" {{if eq $m.NetRemindLeadMinutes 60}}selected{{end}}>1 hour before</option>
+          <option value="30" {{if eq $m.NetRemindLeadMinutes 30}}selected{{end}}>30 minutes before</option>
+          <option value="15" {{if or (eq $m.NetRemindLeadMinutes 15) (eq $m.NetRemindLeadMinutes 0)}}selected{{end}}>15 minutes before</option>
+          <option value="10" {{if eq $m.NetRemindLeadMinutes 10}}selected{{end}}>10 minutes before</option>
+          <option value="5" {{if eq $m.NetRemindLeadMinutes 5}}selected{{end}}>5 minutes before</option>
+          <option value="1" {{if eq $m.NetRemindLeadMinutes 1}}selected{{end}}>1 minute before</option>
+        </select>
+        <button class="btn" type="submit">Save NetRemind preference</button>
+      </form>
+    </section>
   </div>
 </div>
 {{end}}

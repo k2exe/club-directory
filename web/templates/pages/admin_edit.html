@@ -85,6 +85,23 @@
     </section>
 
     <section class="panel">
+      <h2 class="panel-title">Custom roles</h2>
+      {{if .Data.AllRoles}}
+      <form method="post" action="/admin/member/{{$m.ID}}/roles" class="stack">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        {{range .Data.AllRoles}}
+        <label class="check"><input type="checkbox" name="roles" value="{{.ID}}" {{if hasRole $.Data.AssignedIDs .ID}}checked{{end}}>
+          <span class="tag-role role-{{.ID}}">{{.Name}}</span></label>
+        {{end}}
+        <button class="btn btn-quiet" type="submit">Save roles</button>
+      </form>
+      {{else}}
+      <p class="quiet">No custom roles exist yet. <a href="/admin/roles">Create one</a> — Web Admin,
+        Repeater Admin, Net Admin, and so on.</p>
+      {{end}}
+    </section>
+
+    <section class="panel">
       <h2 class="panel-title">Access</h2>
       <p class="quiet">Two-step verification is {{if $m.MFAOn}}on{{else}}off{{end}}{{if $m.IsAdmin}} — required for this admin{{end}}.</p>
       <form method="post" action="/admin/member/{{$m.ID}}/invite">
