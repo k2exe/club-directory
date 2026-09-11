@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -202,7 +203,16 @@ func TestCheckRemindersFiresOnceAndDedups(t *testing.T) {
 // later tick would ever retry, because presence in reminder_log is what
 // stops retries. A failed send must leave the reminder unrecorded so a
 // later tick (still within the catch-up window) retries and succeeds.
-func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
+// Regression (the exact scenario from review): Mailer.Send used to return
+// the SMTP error even when its own fallback spool succeeded, so
+// sendNetReminder treated a durably-spooled message as "not captured
+// anywhere" and released the claim for retry. Across a continuous outage
+// spanning the full 15-minute catch-up window, that meant a fresh spooled
+// copy — no longer silently overwritten, now that spool uses O_EXCL —
+// every single tick: 16 duplicate files for one reminder. A message that
+// is durably captured (delivered OR spooled) must be marked sent
+// immediately and never retried, regardless of whether SMTP itself is up.
+func TestRegressionSMTPOutageDoesNotDuplicateSpooledReminders(t *testing.T) {
 	a := testApp(t)
 	member := mustCreate(t, a, &Member{Email: "reminded@example.com", Name: "R", CallSign: "W1RMD",
 		Role: RoleMember, Status: StatusActive, NetRemindOptIn: true, NetRemindLeadMinutes: 15})
@@ -212,35 +222,71 @@ func TestRegressionFailedReminderRetriesInsteadOfBeingLost(t *testing.T) {
 	}
 	due := starts.Add(-15 * time.Minute)
 
-	// Point the mailer at a port nothing is listening on so delivery fails.
-	// A short timeout keeps this test fast instead of costing real seconds
-	// waiting out the production dial timeout.
+	// Point the mailer at a port nothing is listening on so SMTP delivery
+	// fails, for the entire catch-up window — but the outbox (testApp's
+	// TempDir) stays writable throughout, so every attempt's fallback
+	// spool succeeds.
 	a.mailer.Host, a.mailer.Port = "127.0.0.1", 1
 	a.mailer.DialTimeout = 200 * time.Millisecond
+
+	// The scheduler ticks once a minute; simulate the full 16-minute span
+	// (due, plus the 15-minute catch-up window) the review reproduced.
+	for m := 0; m <= 15; m++ {
+		a.checkReminders(due.Add(time.Duration(m) * time.Minute))
+	}
+
+	sent, err := a.store.reminderIsSent(a.store.Nets()[0].ID, starts, member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sent {
+		t.Error("a message that was durably spooled should be marked sent on the very first attempt")
+	}
+	if files := outboxFiles(t, a); len(files) != 1 {
+		t.Errorf("got %d outbox files across a 16-minute simulated outage, want exactly 1", len(files))
+	}
+}
+
+// The other side of the same fix: if BOTH SMTP delivery and the fallback
+// spool fail, the message genuinely isn't captured anywhere, and the claim
+// must still be released so a later tick retries — this is the one case
+// Mailer.Send is still allowed to return an error for.
+func TestRegressionTotalFailureStillReleasesClaimForRetry(t *testing.T) {
+	a := testApp(t)
+	member := mustCreate(t, a, &Member{Email: "reminded@example.com", Name: "R", CallSign: "W1RMD",
+		Role: RoleMember, Status: StatusActive, NetRemindOptIn: true, NetRemindLeadMinutes: 15})
+	starts := time.Now().Add(20 * time.Minute)
+	if _, err := a.store.SaveNet(Net{Name: "Test Net", Frequency: "146.850", Recur: RecurOnce, StartsAt: starts}); err != nil {
+		t.Fatal(err)
+	}
+	due := starts.Add(-15 * time.Minute)
+
+	a.mailer.Host, a.mailer.Port = "127.0.0.1", 1
+	a.mailer.DialTimeout = 200 * time.Millisecond
+	// A file where the outbox directory should be makes every spool
+	// attempt fail too (os.OpenFile can't create a file inside a file).
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.mailer.Outbox = filepath.Join(blocked, "outbox")
 
 	a.checkReminders(due)
 	if sent, err := a.store.reminderIsSent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
 		t.Fatal(err)
 	} else if sent {
-		t.Fatal("a reminder must not be recorded as sent when delivery failed")
+		t.Fatal("a reminder that was captured nowhere must not be recorded as sent")
 	}
 
-	// "SMTP recovers" — a later tick, still inside the catch-up window,
-	// must retry rather than having given up after the one failure.
+	// "Everything recovers" — a later tick, still inside the catch-up
+	// window, must retry rather than having given up after one failure.
 	a.mailer.Host = ""
+	a.mailer.Outbox = a.store.OutboxDir()
 	a.checkReminders(due.Add(2 * time.Minute))
 	if sent, err := a.store.reminderIsSent(a.store.Nets()[0].ID, starts, member.ID); err != nil {
 		t.Fatal(err)
 	} else if !sent {
 		t.Error("the retried reminder should now be recorded as sent")
-	}
-	// Not asserting an exact outbox file count here: mail.go's spool
-	// filenames are only millisecond+recipient precision, so a failed
-	// attempt's fallback-spool and a fast retry's own spool can collide
-	// and overwrite each other. The dedup state checked above is what
-	// actually matters for this regression.
-	if files := outboxFiles(t, a); len(files) == 0 {
-		t.Error("expected at least one outbox file after the retry")
 	}
 }
 

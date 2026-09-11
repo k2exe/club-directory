@@ -47,11 +47,26 @@ func (m *Mailer) Send(to, subject, body string) error {
 	if !m.Configured() {
 		return m.spool(to, subject, msg)
 	}
-	if err := m.deliver(to, msg); err != nil {
-		// Never lose the message: spool it so an admin can still read it out.
-		m.spool(to, subject, msg)
-		return err
+	deliverErr := m.deliver(to, msg)
+	if deliverErr == nil {
+		return nil
 	}
+	// SMTP failed, but the message is not lost as long as the fallback
+	// spool succeeds — and a non-nil return here is exactly what tells a
+	// caller like the NetRemind scheduler "not captured anywhere, keep
+	// retrying." Returning the SMTP error unconditionally, spool success
+	// or not, used to make every relay outage retry a durably-spooled
+	// reminder every minute for the rest of its catch-up window: one
+	// caller's claim never got marked sent, so nothing ever stopped it
+	// trying again, and O_EXCL's very correctness (no more silent
+	// overwrites) turned that into a pile of retained duplicate copies
+	// instead of one. Only report failure — and only then — if spooling
+	// the fallback copy ALSO fails, and say why on both counts rather than
+	// letting one error mask the other.
+	if spoolErr := m.spool(to, subject, msg); spoolErr != nil {
+		return fmt.Errorf("relay failed (%w) and spooling the fallback copy also failed (%v)", deliverErr, spoolErr)
+	}
+	log.Printf("mail to %s: relay failed (%v), spooled to outbox instead", sanitizeHeaderValue(to), deliverErr)
 	return nil
 }
 
